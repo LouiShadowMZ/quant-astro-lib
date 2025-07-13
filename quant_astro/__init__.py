@@ -5,6 +5,7 @@ from .core import calculate_positions
 from .points import calculate_special_points
 from .kp import get_kp_lords
 from .display import display_kp_table
+from .dasha import calculate_dasha_periods
 
 # 定义包的版本信息
 __version__ = "0.1.0"

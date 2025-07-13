@@ -15,7 +15,7 @@ setup(
     
     # 核心：告诉打包工具包含数据文件！
     package_data={
-        'quant_astro': ['data/sub-sub.csv', 'ephe/*'],
+        'quant_astro': ['data/sub-sub.csv', 'data/star.csv', 'ephe/*'],
     },
     include_package_data=True,
     
