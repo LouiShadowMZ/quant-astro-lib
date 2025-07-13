@@ -4,6 +4,7 @@ import swisseph as swe
 from datetime import datetime, timedelta
 import pytz
 import re
+import pkg_resources # <--- 确保导入这个模块
 
 # (从你原始代码中提取的辅助函数)
 def _parse_dms(dms_str):
@@ -18,31 +19,38 @@ def _parse_timezone(tz_str):
     return sign * (hours + mins/60)
 
 # --- 主计算函数 ---
-
 def calculate_positions(
     local_time_str, timezone_str, latitude_str, longitude_str, elevation,
     ecliptic_mode='sidereal', ayanamsha_mode=swe.SIDM_KRISHNAMURTI_VP291,
-    node_mode='mean', house_system='Placidus', ephe_path='/usr/share/sweph/ephe'
+    node_mode='mean', house_system='Placidus', ephe_path=None # <--- 修改点1：将ephe_path设为可选
 ):
     """
     计算给定时间和地点的行星和宫位位置。
-    
-    返回:
-        一个元组，包含 (planet_positions, house_positions, jd_utc)
+    如果提供了 ephe_path，则使用它。否则，使用库内置的星历文件。
     """
-    swe.set_ephe_path(ephe_path)
+    # 修改点2：根据 ephe_path 是否提供来设置星历路径
+    if ephe_path:
+        # 用户提供了外部路径，使用它
+        swe.set_ephe_path(ephe_path)
+    else:
+        # 用户未提供路径，使用包内自带的路径
+        # 这会自动找到 site-packages/quant_astro/ephe/ 这个目录
+        bundled_ephe_path = pkg_resources.resource_filename('quant_astro', 'ephe')
+        swe.set_ephe_path(bundled_ephe_path)
 
-    # 1. 解析输入参数
+    # 1. 解析输入参数 (这部分逻辑不变)
     local_dt = datetime.strptime(local_time_str, "%Y-%m-%d %H:%M:%S.%f")
     latitude = _parse_dms(latitude_str)
     longitude = _parse_dms(longitude_str)
     timezone_offset = _parse_timezone(timezone_str)
 
-    # 2. 计算儒略日 (Julian Day)
+    # 2. 计算儒略日 (Julian Day) (这部分逻辑不变)
     utc_time = local_dt - timedelta(hours=timezone_offset)
     jd_utc = swe.julday(utc_time.year, utc_time.month, utc_time.day,
                        utc_time.hour + utc_time.minute/60 + utc_time.second/3600)
 
+    # ... (后续所有行星和宫位计算的逻辑都保持完全不变) ...
+    
     # 3. 设置星历计算标志
     if ecliptic_mode == 'sidereal':
         swe.set_sid_mode(ayanamsha_mode)
@@ -75,7 +83,7 @@ def calculate_positions(
 
     # 5. 计算宫位位置
     house_positions = {}
-    house_codes = {'Placidus': b'P', 'Koch': b'K', 'Regiomontanus': b'R', 'Whole Sign': b'W', 'Equal': b'E', 'Campanus': b'C'}
+    house_codes = {'Placidus': b'P', 'Koch': b'K', 'Regiomontanus': b'R', 'Whole Sign': b'W', 'Equal': b'E', 'Campanus': 'C'}
     
     if house_system in house_codes:
         houses, ascmc = swe.houses_ex(jd_utc, latitude, longitude, house_codes[house_system], flags=house_flag)

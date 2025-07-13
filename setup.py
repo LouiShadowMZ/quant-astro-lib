@@ -5,17 +5,17 @@ from setuptools import setup, find_packages
 setup(
     name='quant-astro',  # pip 安装时使用的名字
     version='0.1.0',     # 版本号
-    author='你的名字',    # 替换成你的名字
+    author='Lucius',    # 替换成你的名字
     author_email='你的邮箱@example.com', # 替换成你的邮箱
     description='一个用于量化占星研究的Python库',
     long_description=open('README.md').read() if open('README.md') else '',
     long_description_content_type='text/markdown',
-    url='https://github.com/你的GitHub用户名/你的仓库名', # 替换成你的 GitHub 仓库地址
+    url='https://github.com/LouiShadowMZ/quant-astro-lib.git', # 替换成你的 GitHub 仓库地址
     packages=find_packages(), # 自动寻找包 (会找到 quant_astro 文件夹)
     
     # 核心：告诉打包工具包含数据文件！
     package_data={
-        'quant_astro': ['data/sub-sub.csv'],
+        'quant_astro': ['data/sub-sub.csv', 'ephe/*'],
     },
     include_package_data=True,
     
