@@ -175,6 +175,6 @@ def _generate_dasha_intervals(dasha_start_time, first_lord, dasa_config):
 
     # 根据 output_mode 筛选
     if OUTPUT_MODE == 'present':
-        df = df[df['Level'] > 1].reset_index(drop=True)
+        df = df[df['Level'] == MAX_LEVEL].reset_index(drop=True)
         
     return df
