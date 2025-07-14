@@ -5,7 +5,7 @@ from IPython.display import display, FileLink
 import os
 
 from .core import calculate_positions
-from .dasha_logic import _generate_dasha_periods # Internal logic
+from .dasha_Vimshottari  import _generate_dasha_periods # Internal logic
 
 def create_dasha_table(birth_config, dasa_config, output_filename="dasha_table.csv"):
     """
