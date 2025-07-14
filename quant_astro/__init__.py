@@ -5,7 +5,9 @@ from .core import calculate_positions
 from .points import calculate_special_points
 from .kp import get_kp_lords
 from .display import display_kp_table
-from .dasha import generate_dasha_report 
+
+# 核心修改：从 api.py 导入我们新创建的一键调用函数
+from .api import create_dasha_table 
 
 # 定义包的版本信息
-__version__ = "0.1.0"
+__version__ = "0.2.0"
