@@ -33,3 +33,5 @@ def calculate_and_display_kp(planet_pos, house_pos):
     display_kp_table("🏠 宫头位置 (KP)", kp_houses)
     
     print("✅ KP 表格已成功显示！")
+    
+    return kp_results
