@@ -1,37 +1,43 @@
 # setup.py
 
 from setuptools import setup, find_packages
+import os
+
+# 使用更安全的方式读取 README.md 文件作为项目详细描述
+long_description = ""
+if os.path.exists('README.md'):
+    with open('README.md', 'r', encoding='utf-8') as f:
+        long_description = f.read()
 
 setup(
-    name='quant-astro',  # pip 安装时使用的名字
-    version='0.1.0',     # 版本号
-    author='Lucius',    # 替换成你的名字
-    author_email='你的邮箱@example.com', # 替换成你的邮箱
-    description='一个用于量化占星研究的Python库',
-    long_description=open('README.md').read() if open('README.md') else '',
+    name='quant-astro',
+    version='0.2.0',  # <-- 版本号已更新
+    author='Lucius',
+    author_email='your_email@example.com', # 建议更新为您的真实邮箱
+    description='一个用于量化占星研究的Python库，包含Dasha盘生成功能。', # 描述可以更具体一些
+    long_description=long_description, # <-- 使用了更安全的读取方式
     long_description_content_type='text/markdown',
-    url='https://github.com/LouiShadowMZ/quant-astro-lib.git', # 替换成你的 GitHub 仓库地址
-    packages=find_packages(), # 自动寻找包 (会找到 quant_astro 文件夹)
+    url='https://github.com/LouiShadowMZ/quant-astro-lib.git',
+    packages=find_packages(),
     
-    # 核心：告诉打包工具包含数据文件！
+    # 包含了 data 和 ephe 目录下的所有文件，更具扩展性
     package_data={
-        'quant_astro': ['data/sub-sub.csv', 'data/star.csv', 'ephe/*'],
+        'quant_astro': ['data/*', 'ephe/*'],
     },
     include_package_data=True,
     
-    # 列出这个库运行所需要的其他库
+    # 确认所有依赖项都已列出
     install_requires=[
         'pyswisseph',
         'pytz',
         'pandas',
         'numpy',
-        'ipython' # 因为 display 模块用到了 IPython
+        'ipython' # 新功能需要 pandas 和 ipython
     ],
     
-    # 其他元数据
     classifiers=[
         'Programming Language :: Python :: 3',
-        'License :: OSI Approved :: MIT License', # 你可以选择一个开源协议
+        'License :: OSI Approved :: MIT License',
         'Operating System :: OS Independent',
         'Intended Audience :: Science/Research',
         'Topic :: Scientific/Engineering :: Astronomy',
