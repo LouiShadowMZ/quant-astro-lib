@@ -13,7 +13,7 @@ def _decimal_to_dms_str(decimal_deg):
 def display_kp_table(title, kp_results_dict):
     """以HTML表格形式显示KP占星结果"""
     html = f"<h3>{title}</h3><table>"
-    html += "<tr><th>对象</th><th>星座</th><th>星座内位置</th><th>恒星</th><th>星座主</th><th>恒星主</th><th>子主</th><th>子子主</th></tr>"
+    html += "<tr><th>行星</th><th>sign</th><th>星座内位置</th><th>Star</th><th>RL</th><th>NL</th><th>SL</th><th>SSL</th></tr>"
 
     for name, info in kp_results_dict.items():
         if info is None:
