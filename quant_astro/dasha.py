@@ -7,9 +7,10 @@ import pkg_resources
 import os
 
 # --- 初始化和配置 ---
-getcontext().prec = 28 # 为保证精度，设置一个较高的精度
+# 【精度修正】将精度设为 20，与您原始 Notebook 完全一致
+getcontext().prec = 20
 
-# 行星周期定义 (这是 Dasha 系统的核心规则)
+# 行星周期定义 (不变)
 PLANET_CYCLE = {
     'Ke': {'value': 7, 'next': 'Ve'}, 'Ve': {'value': 20, 'next': 'Su'},
     'Su': {'value': 6, 'next': 'Mo'}, 'Mo': {'value': 10, 'next': 'Ma'},
@@ -18,18 +19,44 @@ PLANET_CYCLE = {
     'Me': {'value': 17, 'next': 'Ke'}
 }
 
-# --- 核心递归函数 (之前已在 Notebook 中验证) ---
+# --- 【核心修正】创建高精度的时间加减辅助函数 ---
+def _add_decimal_seconds(dt, seconds_decimal):
+    """
+    一个高精度的时间加/减法函数，全程使用 Decimal 避免精度损失。
+    """
+    total_seconds = Decimal(seconds_decimal)
+    
+    # 检查是加法还是减法
+    sign = 1 if total_seconds >= 0 else -1
+    total_seconds = abs(total_seconds)
+
+    # 将 Decimal 秒数分解成整数部分，用于 timedelta
+    days = int(total_seconds // 86400)
+    remainder_seconds = total_seconds % 86400
+    seconds_int = int(remainder_seconds)
+    microseconds = int((remainder_seconds - seconds_int) * 1_000_000)
+
+    delta = timedelta(days=days, seconds=seconds_int, microseconds=microseconds)
+
+    if sign == 1:
+        return dt + delta
+    else:
+        return dt - delta
+
+# --- 核心递归函数 (已修正) ---
 def _divide_interval(main_planet, start, end, level, max_level):
     intervals = []
     sub_periods_at_this_level = []
     current_planet = main_planet
     current_start = start
-    parent_total_seconds = Decimal((end - start).total_seconds())
+    # total_seconds() 返回的是 float，我们必须用 Decimal 重新精确计算
+    parent_total_seconds = Decimal((end - start).days * 86400) + Decimal((end - start).seconds) + Decimal((end - start).microseconds) / Decimal(1_000_000)
 
     for _ in range(9):
         planet_years = Decimal(PLANET_CYCLE[current_planet]['value'])
         sub_seconds = (parent_total_seconds * planet_years) / Decimal(120)
-        current_end = current_start + timedelta(seconds=float(sub_seconds))
+        # 【精度修正】使用我们新的高精度时间函数
+        current_end = _add_decimal_seconds(current_start, sub_seconds)
         sub_periods_at_this_level.append((f"L{level} {current_planet}", current_start, current_end))
         current_planet = PLANET_CYCLE[current_planet]['next']
         current_start = current_end
@@ -44,19 +71,13 @@ def _divide_interval(main_planet, start, end, level, max_level):
             
     return intervals
 
-# --- 主功能函数 ---
+# --- 主功能函数 (已修正) ---
 def generate_dasha_table(moon_lon, birth_datetime, days_in_year, max_level, output_mode):
-    """
-    根据月亮经度、出生时间和配置，生成 Dasha 周期列表。
-    
-    返回:
-        一个包含所有 Dasha 周期信息的 Pandas DataFrame。
-    """
-    # 1. 读取库内自带的 star.csv 文件
+    # 1. 读取库内自带的 star.csv 文件 (不变)
     star_csv_path = pkg_resources.resource_filename('quant_astro', 'data/star.csv')
     star_data = pd.read_csv(star_csv_path, dtype={'From': str, 'To': str, 'YearNumber': str})
 
-    # 2. 找到月亮所在的星宿 (Nakshatra)
+    # 2. 找到月亮所在的星宿 (不变)
     moon_star_row = None
     for _, row in star_data.iterrows():
         from_deg = Decimal(row['From'])
@@ -67,14 +88,15 @@ def generate_dasha_table(moon_lon, birth_datetime, days_in_year, max_level, outp
     if moon_star_row is None:
         raise ValueError("无法在 star.csv 中找到对应的月亮位置。")
 
-    # 3. 计算 Dasha 周期的起始时间
+    # 3. 计算 Dasha 周期的起始时间 (不变, 因为这里已经是 Decimal)
     f_val = Decimal(moon_lon) - Decimal(moon_star_row['From'])
     b_val = Decimal(moon_star_row['YearNumber'])
     c_val = b_val * Decimal(days_in_year) * Decimal("86400")
     d_val = c_val * f_val
-    e_seconds = d_val / Decimal("13.333333333333333") # 13°20'
+    e_seconds = d_val / Decimal("13.333333333333333333") # 维持高精度
     
-    dasha_start_time = birth_datetime - timedelta(seconds=float(e_seconds))
+    # 【精度修正】使用我们新的高精度时间函数
+    dasha_start_time = _add_decimal_seconds(birth_datetime, -e_seconds)
 
     # 4. 计算 L1 (大运) 周期
     planet_seconds = {p: Decimal(d['value']) * Decimal(days_in_year) * Decimal("86400") for p, d in PLANET_CYCLE.items()}
@@ -83,33 +105,30 @@ def generate_dasha_table(moon_lon, birth_datetime, days_in_year, max_level, outp
     start_time = dasha_start_time
     current_lord = moon_star_row['Star-Lord']
     
-    # 第一个 L1 周期
-    end_time = start_time + timedelta(seconds=float(planet_seconds[current_lord]))
+    # 【精度修正】所有 timedelta 计算都使用高精度辅助函数
+    end_time = _add_decimal_seconds(start_time, planet_seconds[current_lord])
     level1_intervals.append((f"L1 {current_lord}", start_time, end_time))
     
-    # 剩下的8个 L1 周期
     start_time = end_time
     next_lord = PLANET_CYCLE[current_lord]['next']
     for _ in range(8):
-        end_time = start_time + timedelta(seconds=float(planet_seconds[next_lord]))
+        end_time = _add_decimal_seconds(start_time, planet_seconds[next_lord])
         level1_intervals.append((f"L1 {next_lord}", start_time, end_time))
         start_time = end_time
         next_lord = PLANET_CYCLE[next_lord]['next']
 
-    # 5. 计算所有更深层级的周期
+    # 5 & 6 & 7. 后面逻辑不变
     deeper_intervals_all = []
     for l1_name, l1_start, l1_end in level1_intervals:
         main_planet = l1_name.split()[-1]
         deeper_intervals_all.extend(_divide_interval(main_planet, l1_start, l1_end, 2, max_level))
 
-    # 6. 根据 output_mode 组合最终结果
     all_intervals = []
     if output_mode == 'all':
         all_intervals.extend(level1_intervals)
     all_intervals.extend(deeper_intervals_all)
     all_intervals.sort(key=lambda x: x[1])
 
-    # 7. 将结果格式化为 DataFrame
     output_data = []
     for name, start, _ in all_intervals:
         parts = name.split()
