@@ -1,6 +1,6 @@
 # quant_astro/api.py
-
-from .dasha import _calculate_e_seconds, _calculate_dasha_start_time, _generate_dasha_intervals
+from google.colab import files
+from .dasha_Vimshottari import _calculate_e_seconds, _calculate_dasha_start_time, _generate_dasha_intervals
 from IPython.display import display, FileLink
 import pandas as pd
 import os
@@ -48,6 +48,6 @@ def create_dasha_table(planet_positions, birth_config, dasa_config):
     dasha_df.to_csv(output_filename, index=False, encoding='utf-8')
     print(f"📄 CSV文件 '{output_filename}' 已保存到当前工作目录。")
 
-    # 使用 IPython.display.FileLink 为 Jupyter 环境创建下载链接
-    print("\n✨ 请点击以下链接下载您的 Dasha 表格：")
-    display(FileLink(output_filename))
+    # 使用 google.colab.files.download 来触发浏览器下载
+    print("\n✨ 正在启动浏览器下载...")
+    files.download(output_filename)

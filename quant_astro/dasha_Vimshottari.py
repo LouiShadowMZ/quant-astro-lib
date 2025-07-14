@@ -168,7 +168,7 @@ def _generate_dasha_intervals(dasha_start_time, first_lord, dasa_config):
         final_data.append({
             'Level': int(level[1:]),
             'Planet': planet,
-            'Start Time': start.strftime('%Y-%m-%d %H:%M:%S.%f')
+            'date': start.strftime('%Y-%m-%d %H:%M:%S.%f')
         })
         
     df = pd.DataFrame(final_data)
