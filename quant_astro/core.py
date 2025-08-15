@@ -6,7 +6,6 @@ import pytz
 import re
 import pkg_resources
 import pandas as pd
-_KP_HORARY_CSV_PATH = "/content/drive/MyDrive/program_astro/Astrology/sub-sub.csv"
 
 # (从你原始代码中提取的辅助函数)
 def _parse_dms(dms_str):
@@ -99,7 +98,8 @@ def calculate_positions(
             if not horary_mode or horary_number is None:
                 raise ValueError("卜卦字典中缺少 'mode' 或 'number' 参数。")
 
-            df = pd.read_csv(_KP_HORARY_CSV_PATH)
+            csv_path = pkg_resources.resource_filename('quant_astro', 'data/sub-sub.csv')
+            df = pd.read_csv(csv_path)
             
             if horary_mode.upper() == "KS-N":
                 COLUMN, RESULT_COLUMN = "KS-N", "KS-D"
