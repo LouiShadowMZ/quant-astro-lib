@@ -4,7 +4,9 @@ import swisseph as swe
 from datetime import datetime, timedelta
 import pytz
 import re
-import pkg_resources # <--- 确保导入这个模块
+import pkg_resources
+import pandas as pd
+_KP_HORARY_CSV_PATH = "/content/drive/MyDrive/program_astro/Astrology/sub-sub.csv"
 
 # (从你原始代码中提取的辅助函数)
 def _parse_dms(dms_str):
@@ -22,7 +24,8 @@ def _parse_timezone(tz_str):
 def calculate_positions(
     local_time_str, timezone_str, latitude_str, longitude_str, elevation,
     ecliptic_mode='sidereal', ayanamsha_mode=swe.SIDM_KRISHNAMURTI_VP291,
-    node_mode='mean', house_system='Placidus', ephe_path=None # <--- 修改点1：将ephe_path设为可选
+    node_mode='mean', house_system='Placidus', ephe_path=None, 
+    kp_horary_params: dict = None
 ):
     """
     计算给定时间和地点的行星和宫位位置。
@@ -49,8 +52,6 @@ def calculate_positions(
     jd_utc = swe.julday(utc_time.year, utc_time.month, utc_time.day,
                        utc_time.hour + utc_time.minute/60 + utc_time.second/3600)
 
-    # ... (后续所有行星和宫位计算的逻辑都保持完全不变) ...
-    
     # 3. 设置星历计算标志
     if ecliptic_mode == 'sidereal':
         swe.set_sid_mode(ayanamsha_mode)
@@ -86,7 +87,59 @@ def calculate_positions(
     house_codes = {'Placidus': b'P', 'Koch': b'K', 'Regiomontanus': b'R', 'Whole Sign': b'W', 'Equal': b'E', 'Campanus': 'C'}
     
     if house_system in house_codes:
-        houses, ascmc = swe.houses_ex(jd_utc, latitude, longitude, house_codes[house_system], flags=house_flag)
+            # --- 在计算宫位前，增加这些代码 ---
+        jd_for_houses = jd_utc  # 默认情况下，用原始时间计算宫位
+
+        # 如果启动了卜卦模式，则重新计算用于宫位的时间
+        if kp_horary_params and kp_horary_params.get('is_active', False):
+            print("🔮 已进入卜卦计算模式（仅调整宫位）...")
+            horary_mode = kp_horary_params.get("mode")
+            horary_number = kp_horary_params.get("number")
+
+            if not horary_mode or horary_number is None:
+                raise ValueError("卜卦字典中缺少 'mode' 或 'number' 参数。")
+
+            df = pd.read_csv(_KP_HORARY_CSV_PATH)
+            
+            if horary_mode.upper() == "KS-N":
+                COLUMN, RESULT_COLUMN = "KS-N", "KS-D"
+            else:
+                COLUMN, RESULT_COLUMN = "CIL-N", "From"
+                
+            target_row = df[df[COLUMN] == horary_number]
+            if target_row.empty:
+                raise ValueError(f"在卜卦文件中找不到编号 {horary_number}")
+            target_asc = float(target_row.iloc[0][RESULT_COLUMN])
+            
+            def find_correct_time(target_asc_lon, initial_jd, lat, lon, hs_code, flags, tolerance=1e-7, max_iter=100):
+                jd_low, jd_high = initial_jd - 1.0, initial_jd + 1.0
+                for _ in range(max_iter):
+                    jd_mid = (jd_low + jd_high) / 2
+                    houses_mid = swe.houses_ex(jd_mid, lat, lon, hs_code, flags=flags)[0]
+                    current_asc = houses_mid[0] % 360
+                    diff = (current_asc - target_asc_lon + 180) % 360 - 180
+                    if abs(diff) < tolerance:
+                        return jd_mid
+                    if diff > 0:
+                        jd_high = jd_mid
+                    else:
+                        jd_low = jd_mid
+                return jd_mid
+
+            house_codes_map = {'Placidus': b'P', 'Koch': b'K', 'Regiomontanus': b'R', 'Whole Sign': b'W', 'Equal': b'E', 'Campanus': 'C'}
+            house_flag = swe.FLG_SIDEREAL if ecliptic_mode == 'sidereal' else 0
+            hs_code_bytes = house_codes_map.get(house_system)
+            
+            # 关键：用搜索到的新时间，覆盖用于计算宫位的时间
+            jd_for_houses = find_correct_time(target_asc, jd_utc, latitude, longitude, hs_code_bytes, house_flag)
+        
+
+        
+        # 原始计算宫位代码
+        # houses, ascmc = swe.houses_ex(jd_utc, latitude, longitude, house_codes[house_system], flags=house_flag)
+
+        houses, ascmc = swe.houses_ex(jd_for_houses, latitude, longitude, house_codes[house_system], flags=house_flag)
+        
         for i, cusp_lon in enumerate(houses[:12]):
             pos_ecl = (cusp_lon, 0.0, 1.0)
             pos_eq = swe.cotrans(pos_ecl, swe.FLG_EQUATORIAL)

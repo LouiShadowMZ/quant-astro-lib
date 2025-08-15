@@ -11,10 +11,10 @@ if os.path.exists('README.md'):
 
 setup(
     name='quant-astro',
-    version='0.2.0',  # <-- 版本号已更新
+    version='0.1.3',  # <-- 版本号已更新
     author='Lucius',
-    author_email='your_email@example.com', # 建议更新为您的真实邮箱
-    description='一个用于量化占星研究的Python库，包含Dasha盘生成功能。', # 描述可以更具体一些
+    author_email='kristenrobi85@gmail.com', # 建议更新为您的真实邮箱
+    description='一个用于量化占星研究的Python库。', # 描述可以更具体一些
     long_description=long_description, # <-- 使用了更安全的读取方式
     long_description_content_type='text/markdown',
     url='https://github.com/LouiShadowMZ/quant-astro-lib.git',
