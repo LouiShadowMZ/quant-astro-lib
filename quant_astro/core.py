@@ -71,26 +71,22 @@ def calculate_positions(
 
 
     # 首先，根据是否启用日心制，准备好计算标志和行星列表
-    flag_planets = swe.FLG_SWIEPH | swe.FLG_SPEED
-    if ecliptic_mode == 'sidereal':
-        flag_planets |= swe.FLG_SIDEREAL
-
     planet_positions = {}
-
-    # 从kwargs中安全地获取日心制开关的值，如果找不到，则默认为False
     is_heliocentric = kwargs.get("USE_HELIOCENTRIC", False)
     
     if is_heliocentric:
         print("☀️ 已切换到日心制行星计算模式...")
-        # 为计算标志增加日心制 flag
         flag_planets |= swe.FLG_HELCTR
         
-        # 定义日心制的行星列表 (包含地球，不含太阳、月亮和交点)
+        # 在日心制下，将 node_flag 设为 None，这样它就不会被匹配到
+        node_flag = None 
+        
         planet_map = {
-            swe.EARTH: 'Ea', swe.MOON: 'Mo', swe.MERCURY: 'Me', swe.VENUS: 'Ve', swe.MARS: 'Ma', swe.JUPITER: 'Ju', swe.SATURN: 'Sa', swe.URANUS: 'Ur', swe.NEPTUNE: 'Ne', swe.PLUTO: 'Pl'
+            swe.EARTH: 'Ea', swe.MOON: 'Mo', swe.MERCURY: 'Me', swe.VENUS: 'Ve',
+            swe.MARS: 'Ma', swe.JUPITER: 'Ju', swe.SATURN: 'Sa',
+            swe.URANUS: 'Ur', swe.NEPTUNE: 'Ne', swe.PLUTO: 'Pl'
         }
     else: # 默认使用地心制
-        # 定义地心制的行星列表 (包含太阳、月亮和交点)
         node_flag = swe.TRUE_NODE if node_mode == 'true' else swe.MEAN_NODE
         planet_map = {
             swe.SUN: 'Su', swe.MOON: 'Mo', swe.MERCURY: 'Me', swe.VENUS: 'Ve',
@@ -98,6 +94,7 @@ def calculate_positions(
             swe.NEPTUNE: 'Ne', swe.PLUTO: 'Pl', node_flag: 'Ra'
         }
 
+    # 接上原来的行星函数
     for p_id, name in planet_map.items():
         xx, _ = swe.calc_ut(jd_utc, p_id, flag)
         xx_eq, _ = swe.calc_ut(jd_utc, p_id, flag | swe.FLG_EQUATORIAL)
