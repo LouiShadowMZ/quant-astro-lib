@@ -24,7 +24,7 @@ def calculate_positions(
     local_time_str, timezone_str, latitude_str, longitude_str, elevation,
     ecliptic_mode='sidereal', ayanamsha_mode=swe.SIDM_KRISHNAMURTI_VP291,
     node_mode='mean', house_system='Placidus', ephe_path=None, 
-    kp_horary_params: dict = None
+    **kwargs
 ):
     """
     计算给定时间和地点的行星和宫位位置。
@@ -89,6 +89,9 @@ def calculate_positions(
             # --- 在计算宫位前，增加这些代码 ---
         jd_for_houses = jd_utc  # 默认情况下，用原始时间计算宫位
 
+        # 接着，从kwargs中获取KP卜卦的设置字典
+        kp_horary_params = kwargs.get("KP_HORARY", None)
+
         # 如果启动了卜卦模式，则重新计算用于宫位的时间
         if kp_horary_params and kp_horary_params.get('is_active', False):
             print("🔮 已进入卜卦计算模式（仅调整宫位）...")
@@ -136,7 +139,6 @@ def calculate_positions(
 
         
         # 原始计算宫位代码
-        # houses, ascmc = swe.houses_ex(jd_utc, latitude, longitude, house_codes[house_system], flags=house_flag)
 
         houses, ascmc = swe.houses_ex(jd_for_houses, latitude, longitude, house_codes[house_system], flags=house_flag)
         
