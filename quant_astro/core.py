@@ -277,15 +277,17 @@ def get_sun_rise_and_lord(birth_config, sunrise_config):
     3. 移除不存在的 get_ephe_path 调用。
     """
     # 1. 检查开关
-    
+    if not sunrise_config.get('is_active', False):
+        return {'day_lord': None, 'is_before_sunrise': None}
 
     # --- 确保星历路径已设置 ---
     # pyswisseph 没有 get_ephe_path，因此我们直接尝试设置路径。
     # 这能防止因路径丢失导致的 calculation error (return 0.0)。
-    
-    bundled_ephe_path = pkg_resources.resource_filename('quant_astro', 'ephe')
-    swe.set_ephe_path(bundled_ephe_path)
-    
+    try:
+        bundled_ephe_path = pkg_resources.resource_filename('quant_astro', 'ephe')
+        swe.set_ephe_path(bundled_ephe_path)
+    except Exception:
+        pass # 如果路径设置失败，尝试用默认路径继续运行
 
     # 2. 获取参数
     lat = _parse_dms(birth_config['latitude_str'])
