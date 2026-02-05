@@ -111,7 +111,7 @@ def generate_chart_html(planet_pos, house_pos,
     if kp_house_results:
         for name, data in kp_house_results.items():
             h_num = int(name.replace('house ', ''))
-            _process_kp_row(name, data, chart_dict['kp_data']['houses'], sort_key=h_num)
+            _process_kp_row(str(h_num), data, chart_dict['kp_data']['houses'], sort_key=h_num)
         # 排序宫位
         chart_dict['kp_data']['houses'].sort(key=lambda x: x['sort_id'])
 
