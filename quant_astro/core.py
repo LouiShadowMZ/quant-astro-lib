@@ -278,7 +278,7 @@ def get_sun_rise_and_lord(birth_config, sunrise_config):
     """
     # 1. 检查开关
     if not sunrise_config.get('is_active', False):
-        return {}
+        return {'day_lord': None, 'is_before_sunrise': None}
 
     # --- 确保星历路径已设置 ---
     # pyswisseph 没有 get_ephe_path，因此我们直接尝试设置路径。
