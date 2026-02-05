@@ -170,10 +170,10 @@ def get_significators(planet_pos, house_pos, kp_planet_results, kp_house_results
                     level_1.append(p)
         
         house_sigs[h_num] = {
-            'Level-1': sorted(list(set(level_1))),
-            'Level-2': sorted(list(set(level_2))),
-            'Level-3': sorted(list(set(level_3))),
-            'Level-4': sorted(list(set(level_4)))
+            '1': sorted(list(set(level_1))),
+            '2': sorted(list(set(level_2))),
+            '3': sorted(list(set(level_3))),
+            '4': sorted(list(set(level_4)))
         }
 
     return planet_sigs, house_sigs
