@@ -136,6 +136,8 @@ def generate_chart_html(planet_pos, house_pos,
 
     <canvas id="astroCanvas"></canvas>
 
+    <div id="southIndianChart" class="south-indian-chart"></div>
+
     <div id="tableContainer" class="astro-table-container">
         
         <div class="table-block" id="block-info">
@@ -183,6 +185,11 @@ window.onload = function() {{
         window.renderAstroChart(CHART_DATA);
     }} else {{
         console.error("renderAstroChart 未定义，请检查 astro_style_config.js 是否加载成功");
+    }}
+
+    // [新增] 渲染南印度方盘
+    if (window.renderSouthIndianChart) {{
+        window.renderSouthIndianChart(CHART_DATA);
     }}
 
     // 渲染 KP 表格
