@@ -26,13 +26,14 @@ def _decimal_to_zodiac_parts(lon):
 def generate_chart_html(planet_pos, house_pos, 
                         # 新增参数接收你的字典数据
                         chart_info=None,        # 接收 chart_name, birth_config, options 的合并字典
-                        aspect_data=None,     # <--- 新增：接收相位字典
-                        active_houses=None,   # <--- 新增：接收[1,5,10]这种列表
                         kp_planet_results=None, # 接收 kp_planet_results
                         kp_house_results=None,  # 接收 kp_house_results
                         kp_planet_sigs=None,    # 接收 kp_planet_sigs
                         kp_house_sigs=None,     # 接收 kp_house_sigs
                         kp_ruling_planets=None, # 接收 kp_ruling_planets
+                        # 🔥 新增下面这两行参数
+                        aspect_data=None,       
+                        active_houses=None,
                         output_filename="astro_chart_final.html"):
     """
     生成 HTML，纯 UI 渲染。
@@ -48,12 +49,13 @@ def generate_chart_html(planet_pos, house_pos,
         'kp_data': {'planets': [], 'houses': []},
         'kp_sigs': {'planets': kp_planet_sigs, 'houses': kp_house_sigs},
         'kp_ruling': kp_ruling_planets,
-        'chart_info': chart_info 
+        'chart_info': chart_info,
+
+        # 🔥 新增下面这两行，必须写！
+        'aspect_data': aspect_data if aspect_data else {},
+        'active_houses': active_houses if active_houses else [],
     }
 
-    # [新增] 注入相位数据和宫位配置
-    chart_dict['aspect_data'] = aspect_data if aspect_data else {}
-    chart_dict['active_houses'] = active_houses if active_houses else []
 
     # (1) 处理宫位 (保持原有逻辑)
     sorted_keys = sorted(house_pos.keys(), key=lambda x: int(x.replace('house ', '')))
@@ -200,7 +202,7 @@ window.onload = function() {{
         window.renderSouthIndianChart(CHART_DATA);
     }}
 
-    // [新增] 渲染相位表 (这一段是新加的)
+    // 🔥 新增：如果检测到有相位表渲染函数，就执行它
     if (window.renderAspectGrid) {{
         window.renderAspectGrid(CHART_DATA);
     }}
