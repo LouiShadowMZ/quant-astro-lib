@@ -569,3 +569,141 @@ window.renderSouthIndianChart = function (chartData) {
 
 
 
+
+
+// ============================================================
+// [新增] 渲染相位表 (Aspect Tables - 下三角矩阵)
+// ============================================================
+window.renderAspectTables = function (chartData) {
+    const container = document.getElementById('aspectsContainer');
+    if (!container || !chartData.aspects) return;
+
+    // 1. 获取基础配置列表 (从 Python 传来的 settings)
+    // 如果 Python 没传，就用默认兜底
+    const rawPlanets = chartData.settings?.selected_planets ||
+        ['Su', 'Mo', 'Ma', 'Me', 'Ju', 'Ve', 'Sa', 'Ra', 'Ke'];
+    const activeHouses = chartData.settings?.active_houses || [];
+
+    // 辅助：获取显示符号
+    const getSymbol = (name) => {
+        // 如果是 house 1, house 10 这种格式
+        if (name.startsWith('house')) {
+            return name.replace('house ', ''); // 返回数字
+        }
+        // 如果是行星，查表
+        if (window.ASTRO_STYLE.planetsRegistry[name]) {
+            return window.ASTRO_STYLE.planetsRegistry[name].symbol;
+        }
+        return name; // 兜底
+    };
+
+    // 辅助：构建查找键 (p1, p2) -> "Su-Mo" (字母排序以保证唯一性)
+    const makeKey = (p1, p2) => {
+        return [p1, p2].sort().join('-');
+    };
+
+    // -------------------------------------------------------
+    // 核心渲染器：根据模式数据和骨架列表生成 DOM
+    // -------------------------------------------------------
+    const buildMatrixHTML = (modeName, aspectList, axisItems) => {
+        // 1. 建立数据索引表 Map<"Su-Mo", aspectObj>
+        const dataMap = {};
+        aspectList.forEach(item => {
+            const k = makeKey(item.p1, item.p2);
+            dataMap[k] = item;
+        });
+
+        let html = `<div class="aspect-mode-block">
+            <div class="aspect-mode-title">✨ ${modeName}</div>`;
+
+        // 2. 遍历生成行 (下三角逻辑)
+        // 规则：
+        // axisItems[i] 是当前行的“主角”。
+        // 第一行 (i=0): [空] [主角0] (对角线)
+        // 第二行 (i=1): [主角1] [数据0-1] [主角1] (对角线)
+        // 第 N 行: [主角i] + (i个数据格) + [主角i]
+
+        for (let i = 0; i < axisItems.length; i++) {
+            const currentItem = axisItems[i]; // 当前行的行星
+            const currentSym = getSymbol(currentItem);
+
+            html += `<div class="aspect-row">`;
+
+            // A. 左侧标签
+            if (i === 0) {
+                // 第一行左侧是空的 (First row first column is empty)
+                html += `<div class="aspect-label empty-start"></div>`;
+            } else {
+                html += `<div class="aspect-label">${currentSym}</div>`;
+            }
+
+            // B. 中间数据单元格 (遍历之前的行星)
+            // j 必须小于 i，形成下三角
+            for (let j = 0; j < i; j++) {
+                const targetItem = axisItems[j];
+                const key = makeKey(currentItem, targetItem);
+                const data = dataMap[key];
+
+                if (data) {
+                    // 有相位数据
+                    let content = `<div class="aspect-symbol">${data.type}</div>`;
+
+                    // 如果是容许度模式，且有度数信息
+                    if (data.orb !== undefined) {
+                        // 格式化度数 (不含秒)
+                        // data.orb 是误差度数? 不，通常显示实际度数还是误差? 
+                        // 需求说: "填上相位符号，如果是容许度模式，还要填上“度数”和“A/S”标志"
+                        // 建议显示: error orb (误差) 或者 actual distance? 
+                        // 通常相位表显示的是 "允许度内的误差" (Orb) 比如 6°06'
+
+                        let degVal = Math.abs(data.orb);
+                        let d = Math.floor(degVal);
+                        let m = Math.floor((degVal - d) * 60);
+                        let timeStr = `${d}°${m < 10 ? '0' + m : m}'`;
+
+                        content += `<div class="aspect-deg">${timeStr} ${data.state || ''}</div>`;
+                    }
+
+                    html += `<div class="aspect-cell aspect-data-cell">${content}</div>`;
+                } else {
+                    // 无相位 (空子)
+                    html += `<div class="aspect-cell aspect-data-cell" style="background:#0d1117"></div>`;
+                }
+            }
+
+            // C. 右侧对角线标签 (每一行最后都有)
+            html += `<div class="aspect-label">${currentSym}</div>`;
+
+            html += `</div>`; // End row
+        }
+
+        html += `</div>`; // End block
+        return html;
+    };
+
+    // -------------------------------------------------------
+    // 根据数据动态调用
+    // -------------------------------------------------------
+
+    // 1. Orb Mode (容许度模式)
+    if (chartData.aspects.orb) {
+        // 骨架 = 行星列表 + 激活的宫位
+        // 注意：activeHouses 是数字数组 [1, 5, 10]，需要转成 "house 1" 格式以匹配 data
+        const houseKeys = activeHouses.map(h => `house ${h}`);
+        const skeleton = [...rawPlanets, ...houseKeys];
+
+        container.innerHTML += buildMatrixHTML("Orb Mode (容许度)", chartData.aspects.orb, skeleton);
+    }
+
+    // 2. Whole Sign Mode (整宫制)
+    if (chartData.aspects.whole_sign) {
+        // 骨架 = 仅行星
+        container.innerHTML += buildMatrixHTML("Whole Sign (整宫制)", chartData.aspects.whole_sign, rawPlanets);
+    }
+
+    // 3. Vedic Mode (印度模式)
+    if (chartData.aspects.vedic) {
+        // 骨架 = 仅行星
+        container.innerHTML += buildMatrixHTML("Vedic (印度模式)", chartData.aspects.vedic, rawPlanets);
+    }
+};

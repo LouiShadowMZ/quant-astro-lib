@@ -169,3 +169,119 @@ canvas {
 }
 
 
+
+
+
+/* =========================================
+   [新增] 相位表模块 (Aspect Tables) 样式
+   ========================================= */
+
+/* 1. 最外层大容器 */
+.aspects-main-container {
+    width: 90%;
+    max-width: 900px;
+    margin: 30px auto;
+    display: flex;
+    flex-direction: column;
+    gap: 30px;
+    /* 模式之间的间距 */
+}
+
+/* 2. 单个模式的容器 (Orb / WholeSign / Vedic) */
+.aspect-mode-block {
+    background-color: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 20px;
+    overflow-x: auto;
+    /* 防止窄屏溢出 */
+}
+
+.aspect-mode-title {
+    color: #e6edf3;
+    font-size: 16px;
+    border-bottom: 2px solid #30363d;
+    padding-bottom: 10px;
+    margin-bottom: 15px;
+    text-align: center;
+    font-weight: bold;
+}
+
+/* 3. 网格行布局 (Flex) */
+.aspect-row {
+    display: flex;
+    align-items: center;
+    /* 每一行左对齐，自然形成下三角 */
+    justify-content: flex-start;
+    margin-bottom: 4px;
+}
+
+/* 4. 单元格通用样式 */
+.aspect-cell,
+.aspect-label {
+    width: 70px;
+    /* 单元格宽度，容纳度数文字 */
+    height: 45px;
+    /* 单元格高度 */
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    font-size: 14px;
+    border-radius: 4px;
+    margin-right: 4px;
+    /* 单元格间距 */
+    color: #c9d1d9;
+    position: relative;
+    background-color: #0d1117;
+    /* 默认深底 */
+}
+
+/* 行星标签 (左右两侧的) */
+.aspect-label {
+    background-color: #21262d;
+    /* 稍亮的背景区分标签 */
+    color: #58a6ff;
+    font-size: 18px;
+    /* 符号大一点 */
+    font-family: "Segoe UI Symbol", sans-serif;
+    border: 1px solid #30363d;
+}
+
+/* 第一行第一个必须隐藏/透明 */
+.aspect-label.empty-start {
+    visibility: hidden;
+    background: none;
+    border: none;
+}
+
+/* 相位数据单元格 */
+.aspect-data-cell {
+    background-color: #0d1117;
+    border: 1px solid #30363d;
+    font-size: 12px;
+}
+
+/* 相位符号颜色 */
+.aspect-symbol {
+    font-size: 16px;
+    color: #e6edf3;
+    font-weight: bold;
+}
+
+/* 度数文字 (仅容许度模式) */
+.aspect-deg {
+    font-size: 11px;
+    color: #8b949e;
+    margin-top: 2px;
+}
+
+/* 入/出相位 标记 */
+.aspect-state {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    font-size: 9px;
+    color: #ff7b72;
+    /* 红色系 */
+}

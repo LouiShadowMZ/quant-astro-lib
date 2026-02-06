@@ -31,6 +31,13 @@ def generate_chart_html(planet_pos, house_pos,
                         kp_planet_sigs=None,    # 接收 kp_planet_sigs
                         kp_house_sigs=None,     # 接收 kp_house_sigs
                         kp_ruling_planets=None, # 接收 kp_ruling_planets
+
+                        # === 新增参数 ===
+                        aspect_results=None,     # 接收 aspects.py 的计算结果
+                        aspect_config=None,      # 接收相位配置 (含 active_houses)
+                        calculation_options=None,# 接收计算配置 (含 selected_planets)
+
+
                         output_filename="astro_chart_final.html"):
     """
     生成 HTML，纯 UI 渲染。
@@ -48,6 +55,35 @@ def generate_chart_html(planet_pos, house_pos,
         'kp_ruling': kp_ruling_planets,
         'chart_info': chart_info 
     }
+
+    # ================= [相位插入开始] =================
+    # 初始化新增的容器
+    chart_dict['aspects'] = {}
+    chart_dict['settings'] = {}
+
+    # 1. 注入配置信息 (前端 JS 生成骨架需要用到 selected_planets 和 active_houses)
+    # 只有当传入了 calculation_options 且里面有 selected_planets 时才注入
+    if calculation_options and 'selected_planets' in calculation_options:
+        chart_dict['settings']['selected_planets'] = calculation_options['selected_planets']
+    
+    # 只有当传入了 aspect_config 且里面有 active_houses 时才注入
+    if aspect_config and 'active_houses' in aspect_config:
+        chart_dict['settings']['active_houses'] = aspect_config['active_houses']
+
+    # 2. 注入相位结果 (按需注入，如果某个模式没算出来，就不传给前端，防止前端报错)
+    if aspect_results:
+        # 检查容许度模式
+        if 'orb_mode' in aspect_results and aspect_results['orb_mode']:
+            chart_dict['aspects']['orb'] = aspect_results['orb_mode']
+        
+        # 检查整宫制模式
+        if 'whole_sign_mode' in aspect_results and aspect_results['whole_sign_mode']:
+            chart_dict['aspects']['whole_sign'] = aspect_results['whole_sign_mode']
+            
+        # 检查印度模式
+        if 'vedic_mode' in aspect_results and aspect_results['vedic_mode']:
+            chart_dict['aspects']['vedic'] = aspect_results['vedic_mode']
+    # ================= [相位插入结束] =================
 
     # (1) 处理宫位 (保持原有逻辑)
     sorted_keys = sorted(house_pos.keys(), key=lambda x: int(x.replace('house ', '')))
@@ -138,6 +174,9 @@ def generate_chart_html(planet_pos, house_pos,
 
     <div id="southIndianChart" class="south-indian-chart"></div>
 
+     <!-- [新增] 相位表大容器 -->
+    <div id="aspectsContainer" class="aspects-main-container"></div>
+
     <div id="tableContainer" class="astro-table-container">
         
         <div class="table-block" id="block-info">
@@ -190,6 +229,11 @@ window.onload = function() {{
     // [新增] 渲染南印度方盘
     if (window.renderSouthIndianChart) {{
         window.renderSouthIndianChart(CHART_DATA);
+    }}
+
+    // [新增] 渲染相位表 (这一段是新加的)
+    if (window.renderAspectTables) {{
+        window.renderAspectTables(CHART_DATA);
     }}
 
     // 渲染 KP 表格
