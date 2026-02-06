@@ -31,9 +31,6 @@ def generate_chart_html(planet_pos, house_pos,
                         kp_planet_sigs=None,    # 接收 kp_planet_sigs
                         kp_house_sigs=None,     # 接收 kp_house_sigs
                         kp_ruling_planets=None, # 接收 kp_ruling_planets
-                        # 🔥 新增下面这两行参数
-                        aspect_data=None,       
-                        active_houses=None,
                         output_filename="astro_chart_final.html"):
     """
     生成 HTML，纯 UI 渲染。
@@ -49,13 +46,8 @@ def generate_chart_html(planet_pos, house_pos,
         'kp_data': {'planets': [], 'houses': []},
         'kp_sigs': {'planets': kp_planet_sigs, 'houses': kp_house_sigs},
         'kp_ruling': kp_ruling_planets,
-        'chart_info': chart_info,
-
-        # 🔥 新增下面这两行，必须写！
-        'aspect_data': aspect_data if aspect_data else {},
-        'active_houses': active_houses if active_houses else [],
+        'chart_info': chart_info 
     }
-
 
     # (1) 处理宫位 (保持原有逻辑)
     sorted_keys = sorted(house_pos.keys(), key=lambda x: int(x.replace('house ', '')))
@@ -126,7 +118,7 @@ def generate_chart_html(planet_pos, house_pos,
     json_output = json.dumps(chart_dict, indent=2)
 
     # 3. 定义资源绝对路径
-    base_path = "file:///D:/github/项目经验/Python_金融占星/html"
+    base_path = "file:///D:/github/my_astro_project/html"
 
     # 4. 生成 HTML 内容
     html_content = f"""
@@ -146,8 +138,6 @@ def generate_chart_html(planet_pos, house_pos,
 
     <div id="southIndianChart" class="south-indian-chart"></div>
 
-    <div id="aspectGridContainer" class="astro-table-container" style="border:none; background:transparent;"></div>
-
     <div id="tableContainer" class="astro-table-container">
         
         <div class="table-block" id="block-info">
@@ -156,27 +146,27 @@ def generate_chart_html(planet_pos, house_pos,
         </div>
 
         <div class="table-block" id="block-ruling">
-        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">👑 主宰星</h3>
+        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">👑 主宰星 (Ruling Planets)</h3>
         <div id="rulingTable"></div>
         </div>
 
         <div class="table-block" id="block-kp-planet">
-        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">✨ 行星</h3>
+        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">✨ 行星 KP 详情</h3>
         <div id="kpPlanetTable"></div>
         </div>
 
         <div class="table-block" id="block-kp-house">
-        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🏠 宫位</h3>
+        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🏠 宫位 KP 详情</h3>
         <div id="kpHouseTable"></div>
         </div>
 
         <div class="table-block" id="block-sig-planet">
-        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🌟 行星象征宫位</h3>
+        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🌟 行星象征宫位 (Planet Significators)</h3>
         <div id="sigPlanetTable"></div>
         </div>
 
         <div class="table-block" id="block-sig-house">
-        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🏰 宫位象征星</h3>
+        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🏰 宫位象征星 (House Significators)</h3>
         <div id="sigHouseTable"></div>
         </div>
 
@@ -200,11 +190,6 @@ window.onload = function() {{
     // [新增] 渲染南印度方盘
     if (window.renderSouthIndianChart) {{
         window.renderSouthIndianChart(CHART_DATA);
-    }}
-
-    // 🔥 新增：如果检测到有相位表渲染函数，就执行它
-    if (window.renderAspectGrid) {{
-        window.renderAspectGrid(CHART_DATA);
     }}
 
     // 渲染 KP 表格

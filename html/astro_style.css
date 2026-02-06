@@ -1,0 +1,171 @@
+/* 全局布局 */
+body {
+    margin: 0;
+    /* 这里的背景色只是兜底，实际会被 JS 配置覆盖 */
+    background-color: #0d1117;
+    display: flex;
+    flex-direction: column;
+    /* 改为纵向，方便以后下面放表格 */
+    align-items: center;
+    min-height: 100vh;
+    font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+/* 画布样式 */
+canvas {
+    display: block;
+    /* 消除锯齿，提升清晰度 */
+    image-rendering: -webkit-optimize-contrast;
+    margin: 20px auto;
+}
+
+/* -------------------------------------------------------
+   以后您想加的“三分主星表格”样式，可以在这里预留
+   ------------------------------------------------------- */
+.astro-table-container {
+    margin-top: 20px;
+    padding: 20px;
+    color: #e6edf3;
+    background-color: #161b22;
+    border-radius: 8px;
+    border: 1px solid #30363d;
+    max-width: 800px;
+    width: 90%;
+}
+
+.astro-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.astro-table th,
+.astro-table td {
+    border: 1px solid #30363d;
+    padding: 8px;
+    text-align: center;
+}
+
+.astro-table th {
+    background-color: #21262d;
+    color: #58a6ff;
+}
+
+
+/* --- KP 表格样式 --- */
+.astro-table-container {
+    width: 90%;
+    max-width: 900px;
+    margin: 20px auto;
+    padding: 20px;
+    background-color: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+}
+
+.astro-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+    color: #c9d1d9;
+}
+
+.astro-table th,
+.astro-table td {
+    border: 1px solid #30363d;
+    padding: 8px 12px;
+    text-align: center;
+}
+
+.astro-table th {
+    background-color: #21262d;
+    color: #58a6ff;
+    font-weight: 600;
+}
+
+.astro-table tr:nth-child(even) {
+    background-color: #0d1117;
+}
+
+.astro-table tr:hover {
+    background-color: #1f2428;
+}
+
+
+
+
+
+/* ... (原文件末尾) ... */
+
+/* =========================================
+   [新增] 南印度盘 (South Indian Chart) 样式
+   ========================================= */
+/* =========================================
+   [修复版] 南印度盘 (South Indian Chart) 样式
+   ========================================= */
+.south-indian-chart {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    grid-template-rows: repeat(4, minmax(120px, auto));
+
+    gap: 1.5px;
+
+    /* 边框颜色 (保持你刚才设置的颜色) */
+    background-color: #e6edf3;
+    border: 1.5px solid #e6edf3;
+
+    margin: 30px auto;
+    width: 90%;
+    max-width: 600px;
+}
+
+.si-cell {
+    background-color: #0d1117;
+    color: #e6edf3;
+    padding: 10px;
+    font-size: 17px;
+
+    display: flex;
+    flex-direction: column;
+
+    /* [关键修改] 删除了 overflow: hidden;
+       绝对不能隐藏溢出，必须让格子随着内容长高 */
+    position: relative;
+}
+
+
+/* 行星和宫位行的样式 */
+.si-item {
+    display: flex;
+    justify-content: flex-start;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 2px;
+}
+
+
+/* 行星颜色 */
+.si-item.planet {
+    color: #A5D6A7;
+}
+
+/* 宫位颜色 */
+.si-item.house {
+    color: #c9d1d9;
+}
+
+
+
+/* 中间的大空洞 (合并中间 2x2 的区域) */
+.si-center {
+    grid-column: 2 / span 2;
+    grid-row: 2 / span 2;
+    background-color: #0d1117;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #8b949e;
+    font-size: 12px;
+    text-align: center;
+}
+
+
