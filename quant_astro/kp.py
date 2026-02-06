@@ -194,8 +194,11 @@ def get_ruling_planets(kp_planet_results, kp_house_results, day_lord):
         'Asc_Sub_Lord':  asc_data.get('sub_lord'),
         'Moon_Sign_Lord': moon_data.get('sign_lord'),
         'Moon_Star_Lord': moon_data.get('star_lord'),
-        'Moon_Sub_Lord':  moon_data.get('sub_lord'),
-        'Day_Lord':       day_lord
+        'Moon_Sub_Lord':  moon_data.get('sub_lord')
     }
+
+    # 2. 动态逻辑：只有当 day_lord 存在且不为空时，才添加进字典
+    if day_lord:
+        ruling_planets['Day_Lord'] = day_lord
 
     return ruling_planets
