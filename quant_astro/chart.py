@@ -26,6 +26,8 @@ def _decimal_to_zodiac_parts(lon):
 def generate_chart_html(planet_pos, house_pos, 
                         # 新增参数接收你的字典数据
                         chart_info=None,        # 接收 chart_name, birth_config, options 的合并字典
+                        aspect_data=None,     # <--- 新增：接收相位字典
+                        active_houses=None,   # <--- 新增：接收[1,5,10]这种列表
                         kp_planet_results=None, # 接收 kp_planet_results
                         kp_house_results=None,  # 接收 kp_house_results
                         kp_planet_sigs=None,    # 接收 kp_planet_sigs
@@ -48,6 +50,10 @@ def generate_chart_html(planet_pos, house_pos,
         'kp_ruling': kp_ruling_planets,
         'chart_info': chart_info 
     }
+
+    # [新增] 注入相位数据和宫位配置
+    chart_dict['aspect_data'] = aspect_data if aspect_data else {}
+    chart_dict['active_houses'] = active_houses if active_houses else []
 
     # (1) 处理宫位 (保持原有逻辑)
     sorted_keys = sorted(house_pos.keys(), key=lambda x: int(x.replace('house ', '')))
@@ -138,6 +144,8 @@ def generate_chart_html(planet_pos, house_pos,
 
     <div id="southIndianChart" class="south-indian-chart"></div>
 
+    <div id="aspectGridContainer" class="astro-table-container" style="border:none; background:transparent;"></div>
+
     <div id="tableContainer" class="astro-table-container">
         
         <div class="table-block" id="block-info">
@@ -146,27 +154,27 @@ def generate_chart_html(planet_pos, house_pos,
         </div>
 
         <div class="table-block" id="block-ruling">
-        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">👑 主宰星 (Ruling Planets)</h3>
+        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">👑 主宰星</h3>
         <div id="rulingTable"></div>
         </div>
 
         <div class="table-block" id="block-kp-planet">
-        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">✨ 行星 KP 详情</h3>
+        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">✨ 行星</h3>
         <div id="kpPlanetTable"></div>
         </div>
 
         <div class="table-block" id="block-kp-house">
-        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🏠 宫位 KP 详情</h3>
+        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🏠 宫位</h3>
         <div id="kpHouseTable"></div>
         </div>
 
         <div class="table-block" id="block-sig-planet">
-        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🌟 行星象征宫位 (Planet Significators)</h3>
+        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🌟 行星象征宫位</h3>
         <div id="sigPlanetTable"></div>
         </div>
 
         <div class="table-block" id="block-sig-house">
-        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🏰 宫位象征星 (House Significators)</h3>
+        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🏰 宫位象征星</h3>
         <div id="sigHouseTable"></div>
         </div>
 
@@ -190,6 +198,11 @@ window.onload = function() {{
     // [新增] 渲染南印度方盘
     if (window.renderSouthIndianChart) {{
         window.renderSouthIndianChart(CHART_DATA);
+    }}
+
+    // [新增] 渲染相位表 (这一段是新加的)
+    if (window.renderAspectGrid) {{
+        window.renderAspectGrid(CHART_DATA);
     }}
 
     // 渲染 KP 表格
