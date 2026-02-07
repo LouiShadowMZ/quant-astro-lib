@@ -107,7 +107,7 @@ def is_applying(p1_data, p2_data, target_angle):
     curr_dist = get_shortest_distance(l1, l2)
     
     # 预测极小时间步长后的位置 (例如1小时 = 1/24天)
-    dt = 1.0 / 24.0 
+    dt = 1.0 / 1440.0
     l1_next = (l1 + s1 * dt) % 360
     l2_next = (l2 + s2 * dt) % 360
     
