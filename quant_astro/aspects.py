@@ -36,27 +36,41 @@ def parse_dms_string(dms_str):
 
 def parse_orb_config(config_str):
     """
-    解析类似 "Su: 16°...; Mo: 06°" 的字符串为字典
+    解析配置字符串 (防弹版)。
+    支持：换行、注释、纯数字宫位、行星简写。
     """
     orbs = {}
     if not config_str:
         return orbs
     
+    # [改进1] 先把所有“换行符”替换成“分号”，这样用户每行写一个配置不加分号也没事
+    clean_str = config_str.replace('\n', ';')
+    
     # 按分号分割
-    items = config_str.split(';')
+    items = clean_str.split(';')
+    
     for item in items:
+        # [改进2] 先处理注释：如果这一段里有 #，只取 # 前面的部分
+        if '#' in item:
+            item = item.split('#')[0]
+            
+        item = item.strip()
+        if not item: 
+            continue # 跳过空行或纯注释行
+        
         if ':' in item:
-            key, val = item.split(':')
+            # [改进3] split(':', 1) 只切第一刀，防止 ValueError
+            key, val = item.split(':', 1)
             key = key.strip()
-            val_float = parse_dms_string(val.strip())
             
-            # [修改] 极简逻辑：如果是纯数字，就认为是宫位
+            # 纯数字转 house
             if key.isdigit():
-                key = f"house {key}" # 例如 "1" -> "house 1"
+                key = f"house {key}"
             
-            # 只要不是空的，就存进去 (不再限制只许行星)
+            # 解析度数
             if key:
-                orbs[key] = val_float
+                orbs[key] = parse_dms_string(val.strip())
+                
     return orbs
 
 def parse_aspect_types(type_list):
