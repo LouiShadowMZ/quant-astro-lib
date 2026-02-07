@@ -227,7 +227,9 @@ def calculate_positions(
         
         # 原始计算宫位代码
 
-        houses, ascmc = swe.houses_ex(jd_for_houses, latitude, longitude, house_codes[house_system], flags=house_flag)
+        houses, ascmc, houses_speed, ascmc_speed = swe.houses_ex2(
+                jd_for_houses, latitude, longitude, house_codes[house_system], flags=house_flag
+            )
         
         for i, cusp_lon in enumerate(houses[:12]):
             # === 【修改开始：同时修正1宫和7宫】 ===
@@ -244,10 +246,14 @@ def calculate_positions(
                     final_lon = (target_asc + 180.0) % 360.0
             # === 【修改结束】 ===
 
+            # ----------------- [新增] 将 speed 写入字典 -----------------
+            # 注意：houses_speed[i] 就是对应宫头的日速度 (度/天)
+            current_speed = houses_speed[i]
+
             pos_ecl = (final_lon, 0.0, 1.0)
             pos_eq = swe.cotrans(pos_ecl, swe.FLG_EQUATORIAL)
             # 注意：这里的 'lon' 用的是 final_lon
-            house_positions[f"house {i+1}"] = {'lon': final_lon, 'lat': 0.0, 'ra': pos_eq[0], 'dec': pos_eq[1]}
+            house_positions[f"house {i+1}"] = {'lon': final_lon, 'lat': 0.0, 'speed': current_speed, 'ra': pos_eq[0], 'dec': pos_eq[1]}
 
 
     # ----------------- [新增] 按照用户配置顺序重组字典 -----------------

@@ -103,20 +103,31 @@ def is_applying(p1_data, p2_data, target_angle):
     l1, s1 = p1_data['lon'], p1_data.get('speed', 0)
     l2, s2 = p2_data['lon'], p2_data.get('speed', 0)
     
-    # 当前距离
-    curr_dist = get_shortest_distance(l1, l2)
-    
     # 预测极小时间步长后的位置 (例如1小时 = 1/24天)
     dt = 1.0 / 1440.0
+
+    # 1. 计算当前时刻的距离误差
+    curr_dist = get_shortest_distance(l1, l2)
+    curr_err = abs(curr_dist - target_angle)
+
+
     l1_next = (l1 + s1 * dt) % 360
     l2_next = (l2 + s2 * dt) % 360
     
     next_dist = get_shortest_distance(l1_next, l2_next)
     
-    # 计算与目标角度的偏差
-    curr_err = abs(curr_dist - target_angle)
+    # 3. 计算 1分钟后 的距离误差
+    next_dist = get_shortest_distance(l1_next, l2_next)
     next_err = abs(next_dist - target_angle)
     
+    # [优化] 如果变化极小（小于 0.000000001 度），视为保持现状或精准
+    # 这可以防止两颗慢行星(或恒星)因浮点数精度问题乱跳
+    if abs(next_err - curr_err) < 1e-9:
+        # 如果当前误差极小，返回精准，否则视为出相位(或保持)
+        return 'E' if curr_err < 0.001 else 'S'
+
+    # 4. 判定逻辑
+    # 误差变小 = 正在靠近 = 入相位
     if next_err < curr_err:
         return 'A' # Applying
     else:
