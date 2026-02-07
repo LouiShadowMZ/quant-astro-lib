@@ -185,27 +185,27 @@ def generate_chart_html(planet_pos, house_pos,
         </div>
 
         <div class="table-block" id="block-ruling">
-        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">👑 主宰星 (Ruling Planets)</h3>
+        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">👑 主宰星</h3>
         <div id="rulingTable"></div>
         </div>
 
         <div class="table-block" id="block-kp-planet">
-        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">✨ 行星 KP 详情</h3>
+        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">✨ 行星 KP</h3>
         <div id="kpPlanetTable"></div>
         </div>
 
         <div class="table-block" id="block-kp-house">
-        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🏠 宫位 KP 详情</h3>
+        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🏠 宫位 KP</h3>
         <div id="kpHouseTable"></div>
         </div>
 
         <div class="table-block" id="block-sig-planet">
-        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🌟 行星象征宫位 (Planet Significators)</h3>
+        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🌟 行星象征宫位</h3>
         <div id="sigPlanetTable"></div>
         </div>
 
         <div class="table-block" id="block-sig-house">
-        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🏰 宫位象征星 (House Significators)</h3>
+        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🏰 宫位象征星</h3>
         <div id="sigHouseTable"></div>
         </div>
 
