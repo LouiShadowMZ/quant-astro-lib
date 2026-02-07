@@ -48,9 +48,15 @@ def parse_orb_config(config_str):
         if ':' in item:
             key, val = item.split(':')
             key = key.strip()
-            # 兼容三王星
-            if key in ['Su', 'Mo', 'Me', 'Ve', 'Ma', 'Ju', 'Sa', 'Ra', 'Ke', 'Ur', 'Ne', 'Pl']:
-                orbs[key] = parse_dms_string(val.strip())
+            val_float = parse_dms_string(val.strip())
+            
+            # [修改] 极简逻辑：如果是纯数字，就认为是宫位
+            if key.isdigit():
+                key = f"house {key}" # 例如 "1" -> "house 1"
+            
+            # 只要不是空的，就存进去 (不再限制只许行星)
+            if key:
+                orbs[key] = val_float
     return orbs
 
 def parse_aspect_types(type_list):
@@ -153,9 +159,9 @@ def calculate_aspects(planet_pos, house_pos, aspect_config):
                 if b1['type'] == 'house' and b2['type'] == 'house':
                     continue
                 
-                # 获取容许度
-                orb1 = orb_settings.get(b1['name'], 0.0) if b1['type'] == 'planet' else 0.0
-                orb2 = orb_settings.get(b2['name'], 0.0) if b2['type'] == 'planet' else 0.0
+                # [修改] 不再区分行星还是宫位，统一查表
+                orb1 = orb_settings.get(b1['name'], 0.0)
+                orb2 = orb_settings.get(b2['name'], 0.0)
                 
                 # 判罚标准：平均值
                 limit = (orb1 + orb2) / 2.0
