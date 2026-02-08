@@ -11,13 +11,6 @@ body {
     font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
-/* 画布样式 */
-canvas {
-    display: block;
-    /* 消除锯齿，提升清晰度 */
-    image-rendering: -webkit-optimize-contrast;
-    margin: 20px auto;
-}
 
 /* -------------------------------------------------------
    以后您想加的“三分主星表格”样式，可以在这里预留
@@ -154,7 +147,6 @@ canvas {
 }
 
 
-
 /* 中间的大空洞 (合并中间 2x2 的区域) */
 .si-center {
     grid-column: 2 / span 2;
@@ -171,117 +163,233 @@ canvas {
 
 
 
-
 /* =========================================
-   [新增] 相位表模块 (Aspect Tables) 样式
+   [CSS Grid 版] 相位表样式
    ========================================= */
 
-/* 1. 最外层大容器 */
-.aspects-main-container {
-    width: 90%;
-    max-width: 900px;
-    margin: 30px auto;
-    display: flex;
-    flex-direction: column;
-    gap: 30px;
-    /* 模式之间的间距 */
-}
-
-/* 2. 单个模式的容器 (Orb / WholeSign / Vedic) */
-.aspect-mode-block {
-    background-color: #161b22;
-    border: 1px solid #30363d;
+/* 1. 模式容器：这里定义网格 */
+.aspect-grid-mode {
+    background-color: #4e4e4e;
+    /* 网格线的颜色 (gap露出来的颜色) */
+    border: 1px solid #c9d1d9;
+    /* 外边框 */
     border-radius: 6px;
-    padding: 20px;
+    padding: 0px;
+    /* 让外边框和内部格子之间有一点缓冲或紧贴 */
+    display: grid;
+    gap: 1px;
+    /* 关键：这就是那个“横竖交叉线”的宽度 */
+    margin-bottom: 30px;
     overflow-x: auto;
-    /* 防止窄屏溢出 */
+    /* 防止太宽撑破 */
 }
 
+/* 标题栏单独放外面，或者作为 grid 的第一行跨列，这里建议放外面 */
 .aspect-mode-title {
     color: #e6edf3;
     font-size: 16px;
-    border-bottom: 2px solid #30363d;
-    padding-bottom: 10px;
-    margin-bottom: 15px;
+    margin-bottom: 10px;
     text-align: center;
     font-weight: bold;
 }
 
-/* 3. 网格行布局 (Flex) */
-.aspect-row {
-    display: flex;
-    align-items: center;
-    /* 每一行左对齐，自然形成下三角 */
-    justify-content: flex-start;
-    margin-bottom: 4px;
-}
-
-/* 4. 单元格通用样式 */
-.aspect-cell,
-.aspect-label {
-    width: 70px;
-    /* 单元格宽度，容纳度数文字 */
+/* 2. 单元格通用样式 */
+.aspect-cell {
+    /* 宽高不再强制固定，而是由 Grid 控制，但可以给个最小宽高 */
+    min-width: 60px;
     height: 45px;
-    /* 单元格高度 */
+
+    background-color: #0d1117;
+    /* 格子背景色 */
+
     display: flex;
     flex-direction: column;
     justify-content: center;
     align-items: center;
     font-size: 14px;
-    border-radius: 4px;
-    margin-right: 4px;
-    /* 单元格间距 */
     color: #c9d1d9;
     position: relative;
-    background-color: #0d1117;
-    /* 默认深底 */
+    font-weight: normal
 }
 
-/* 行星标签 (左右两侧的) */
+/* 3. 标签格子 (左侧和对角线) */
 .aspect-label {
-    background-color: #21262d;
-    /* 稍亮的背景区分标签 */
-    color: #58a6ff;
-    font-size: 18px;
-    /* 符号大一点 */
-    font-family: "Segoe UI Symbol", sans-serif;
-    border: 1px solid #30363d;
-}
-
-/* 第一行第一个必须隐藏/透明 */
-.aspect-label.empty-start {
-    visibility: hidden;
-    background: none;
-    border: none;
-}
-
-/* 相位数据单元格 */
-.aspect-data-cell {
     background-color: #0d1117;
-    border: 1px solid #30363d;
-    font-size: 12px;
-}
-
-/* 相位符号颜色 */
-.aspect-symbol {
-    font-size: 16px;
+    /* 稍亮一点区分 */
     color: #e6edf3;
-    font-weight: bold;
+    font-weight: normal;
+    font-family: "Segoe UI Symbol", sans-serif;
+    font-size: 20px
 }
 
-/* 度数文字 (仅容许度模式) */
+/* 4. 空格子 (右上角区域) */
+.aspect-empty {
+    background-color: #0d1117;
+    /* 比数据格稍淡，比背景深，表示“无” */
+}
+
+/* 5. 数据格内部微调 */
+.aspect-symbol {
+    font-size: 17px;
+    color: #e6edf3;
+    font-weight: normal;
+}
+
 .aspect-deg {
-    font-size: 11px;
+    font-size: 14px;
     color: #8b949e;
     margin-top: 2px;
 }
 
-/* 入/出相位 标记 */
-.aspect-state {
-    position: absolute;
-    top: 2px;
-    right: 2px;
-    font-size: 9px;
-    color: #ff7b72;
-    /* 红色系 */
+
+
+/* =========================================
+   SVG 星盘专用样式 (New Astro Chart)
+   ========================================= */
+
+/* 1. 容器：控制星盘的大小和位置 */
+#svgChartContainer {
+    width: 100%;
+    max-width: 600px;
+    /* 限制最大宽度 */
+    margin: 60px auto;
+    /* 居中 */
+    aspect-ratio: 1 / 1;
+    /* 强制保持正方形 */
+    position: relative;
+    background-color: #0d1117;
+    /* 背景色 */
+    border-radius: 50%;
+    /* 可选：让背景呈圆形 */
+}
+
+/* 2. SVG 本体 */
+svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+    overflow: visible;
+    /* 允许文字稍微突出 */
+}
+
+/* 3. 线条样式 */
+.stroke-main {
+    stroke: #e6edf3;
+    /* 亮白色 */
+    stroke-width: 2px;
+    fill: none;
+}
+
+.stroke-dim {
+    stroke: #30363d;
+    /* 深灰色 */
+    stroke-width: 1px;
+    fill: none;
+}
+
+.stroke-house {
+    stroke: #30363d;
+    /* 宫位线颜色 */
+    stroke-width: 1.5px;
+    fill: none;
+}
+
+/* 4. 文字通用样式 */
+.text-planet {
+    font-family: "Segoe UI Symbol", "Apple Color Emoji", sans-serif;
+    text-anchor: middle;
+    /* 水平居中 */
+    dominant-baseline: central;
+    /* 垂直居中 */
+    font-weight: normal;
+    cursor: default;
+    user-select: none;
+}
+
+/* 修正后的逆行标记样式 */
+.text-retro {
+    font-family: "Segoe UI Symbol", sans-serif;
+    text-anchor: middle;
+    /* 核心修复：水平居中 */
+    dominant-baseline: central;
+    /* 核心修复：垂直居中 */
+    font-weight: bold;
+    /* 你可以在这里改 R 的大小 */
+    fill: #FF8A80;
+    /* 红色 */
+    cursor: default;
+    user-select: none;
+}
+
+
+
+
+
+
+
+/* =========================================
+   [新增] 左右分栏布局 (Two Column Layout)
+   ========================================= */
+
+/* 1. 主包装器：包裹下方所有内容 */
+.main-content-wrapper {
+    display: flex;
+    flex-direction: row;
+    /* 横向排列 */
+    justify-content: center;
+    align-items: flex-start;
+    /* 顶部对齐 */
+    gap: 40px;
+    /* 左右两栏的间距 */
+    width: 95%;
+    max-width: 1600px;
+    /* 限制最大总宽 */
+    margin: 20px auto;
+    /* 居中 */
+}
+
+/* 2. 左侧栏：南印度盘 + 相位表 */
+.column-left {
+    flex: 1;
+    /* 占用 1 份空间 */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    /* 内容居中 */
+    min-width: 400px;
+    /* 防止压得太扁 */
+}
+
+/* 3. 右侧栏：所有数据表格 */
+.column-right {
+    flex: 1;
+    /* 占用 1 份空间 */
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    /* 表格拉伸填满宽度 */
+    min-width: 400px;
+}
+
+/* 4. [修改] 覆盖原有的表格容器样式，使其在分栏中 100% 宽 */
+.column-right .astro-table-container {
+    width: 100% !important;
+    max-width: none !important;
+    /* 取消原先 800px/900px 的限制 */
+    margin: 0 0 20px 0;
+    /* 调整间距 */
+    box-sizing: border-box;
+}
+
+/* 5. 响应式：屏幕太窄（比如手机）时自动变回上下堆叠 */
+@media (max-width: 1000px) {
+    .main-content-wrapper {
+        flex-direction: column;
+        align-items: center;
+    }
+
+    .column-left,
+    .column-right {
+        width: 100%;
+    }
 }

@@ -163,85 +163,68 @@ def generate_chart_html(planet_pos, house_pos,
 <head>
     <meta charset="UTF-8">
     <title>Astrology Chart</title>
-    <!-- 引用绝对路径的 CSS -->
     <link rel="stylesheet" href="{base_path}/astro_style.css">
-    <!-- 引用绝对路径的 JS (配置 + 渲染逻辑) -->
     <script src="{base_path}/astro_style_config.js"></script>
 </head>
 <body>
 
-    <canvas id="astroCanvas"></canvas>
+    <div id="svgChartContainer" class="chart-container"></div>
 
-    <div id="southIndianChart" class="south-indian-chart"></div>
-
-     <!-- [新增] 相位表大容器 -->
-    <div id="aspectsContainer" class="aspects-main-container"></div>
-
-    <div id="tableContainer" class="astro-table-container">
+    <div class="main-content-wrapper">
         
-        <div class="table-block" id="block-info">
-        <h3 style="color:#e6edf3; text-align:center; border-bottom: 2px solid #30363d; padding-bottom: 10px;">📋 占星配置信息</h3>
-        <div id="infoTable"></div>
+        <div class="column-left">
+            <h3 style="color:#e6edf3; margin-bottom:10px;">🛕 南印度盘</h3>
+            <div id="southIndianChart" class="south-indian-chart"></div>
+            
+            <h3 style="color:#e6edf3; margin-top:30px; margin-bottom:10px;">📐 相位表</h3>
+            <div id="aspectsContainer" class="aspects-main-container"></div>
         </div>
 
-        <div class="table-block" id="block-ruling">
-        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">👑 主宰星</h3>
-        <div id="rulingTable"></div>
-        </div>
+        <div class="column-right">
+            
+            <div class="astro-table-container">
+                
+                <div class="table-block" id="block-info">
+                    <h3 style="color:#e6edf3; text-align:center; border-bottom: 2px solid #30363d; padding-bottom: 10px;">📋 占星配置信息</h3>
+                    <div id="infoTable"></div>
+                </div>
 
-        <div class="table-block" id="block-kp-planet">
-        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">✨ 行星 KP</h3>
-        <div id="kpPlanetTable"></div>
-        </div>
+                <div class="table-block" id="block-ruling">
+                    <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">👑 主宰星</h3>
+                    <div id="rulingTable"></div>
+                </div>
 
-        <div class="table-block" id="block-kp-house">
-        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🏠 宫位 KP</h3>
-        <div id="kpHouseTable"></div>
-        </div>
+                <div class="table-block" id="block-kp-planet">
+                    <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">✨ 行星 KP 详情</h3>
+                    <div id="kpPlanetTable"></div>
+                </div>
 
-        <div class="table-block" id="block-sig-planet">
-        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🌟 行星象征宫位</h3>
-        <div id="sigPlanetTable"></div>
-        </div>
+                <div class="table-block" id="block-kp-house">
+                    <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🏠 宫位 KP 详情</h3>
+                    <div id="kpHouseTable"></div>
+                </div>
 
-        <div class="table-block" id="block-sig-house">
-        <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🏰 宫位象征星</h3>
-        <div id="sigHouseTable"></div>
-        </div>
+                <div class="table-block" id="block-sig-planet">
+                    <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🌟 行星象征宫位</h3>
+                    <div id="sigPlanetTable"></div>
+                </div>
 
-    </div>
+                <div class="table-block" id="block-sig-house">
+                    <h3 style="color:#e6edf3; text-align:center; margin-top:30px;">🏰 宫位象征星</h3>
+                    <div id="sigHouseTable"></div>
+                </div>
 
-<script>
+            </div> </div> </div> <script>
 // 1. 注入数据 (来自 Python)
 const CHART_DATA = {json_output};
 
-
 // 2. 启动渲染
-// 确保 external JS 加载完成后执行
 window.onload = function() {{
-    // 渲染星盘
-    if (window.renderAstroChart) {{
-        window.renderAstroChart(CHART_DATA);
-    }} else {{
-        console.error("renderAstroChart 未定义，请检查 astro_style_config.js 是否加载成功");
-    }}
-
-    // [新增] 渲染南印度方盘
-    if (window.renderSouthIndianChart) {{
-        window.renderSouthIndianChart(CHART_DATA);
-    }}
-
-    // [新增] 渲染相位表 (这一段是新加的)
-    if (window.renderAspectTables) {{
-        window.renderAspectTables(CHART_DATA);
-    }}
-
-    // 渲染 KP 表格
-    if (window.renderKpTables) {{
-        window.renderKpTables(CHART_DATA);
-    }}
+    if (window.renderAstroChart) window.renderAstroChart(CHART_DATA);
+    if (window.renderSouthIndianChart) window.renderSouthIndianChart(CHART_DATA);
+    if (window.renderAspectTables) window.renderAspectTables(CHART_DATA);
+    if (window.renderKpTables) window.renderKpTables(CHART_DATA);
 }};
-
 </script>
 </body>
 </html>
