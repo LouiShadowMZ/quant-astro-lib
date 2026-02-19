@@ -270,35 +270,8 @@ def calculate_positions(
                 ordered_pos[k] = v
         planet_positions = ordered_pos
     # ----------------- [新增结束] -----------------
-
-    # =========================================================================
-    # [新增] 核心修改：计算行星与宫头的星座归属 (Zodiac Attribution)
-    # =========================================================================
-    ZODIAC_NAMES = ['Ari', 'Tau', 'Gem', 'Cnc', 'Leo', 'Vir', 'Lib', 'Sco', 'Sag', 'Cap', 'Aqr', 'Pis']
-
-    def _get_sign_info(lon_decimal):
-        """内部辅助：根据绝对黄经计算星座和星座内度数"""
-        idx = int(lon_decimal / 30) % 12
-        lon_in_sign = lon_decimal % 30
-        return {
-            'sign': ZODIAC_NAMES[idx],      # 星座简称 (如 Ari, Tau)
-            'lon': lon_in_sign              # 星座内的度数 (0.0 - 29.999...)
-        }
-
-    # 1. 生成行星星座归属字典
-    planet_signs = {
-        k: _get_sign_info(v['lon']) 
-        for k, v in planet_positions.items()
-    }
-
-    # 2. 生成宫位星座归属字典
-    house_signs = {
-        k: _get_sign_info(v['lon']) 
-        for k, v in house_positions.items()
-    }
-    # =========================================================================
     
-    return planet_positions, house_positions, planet_signs, house_signs, ascmc, jd_utc, dignity_results
+    return planet_positions, house_positions, ascmc, jd_utc, dignity_results
 
 
     # ----------------- [新增] 独立计算函数：日出与值日星 -----------------
