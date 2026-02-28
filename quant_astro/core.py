@@ -154,7 +154,7 @@ def calculate_positions(
         # 存储逻辑：检查是否需要保存该具体行星
         # 对于普通行星和 Ra：
         if name != 'Ra' or (selected_planets is None or 'All' in selected_planets or 'Ra' in selected_planets):
-             planet_positions[name] = {'lon': xx[0] % 360, 'lat': xx[1], 'speed': xx[3], 'ra': xx_eq[0], 'dec': xx_eq[1]}
+            planet_positions[name] = {'lon': xx[0] % 360, 'lat': xx[1], 'speed': xx[3], 'ra': xx_eq[0], 'dec': xx_eq[1], 'dec_speed': xx_eq[4]}
         
         # 对于计都 (Ke) 的特殊处理：
         if p_id == node_flag:
@@ -164,7 +164,7 @@ def calculate_positions(
                 south_lat = -xx[1]
                 pos_ecl_south = (south_lon, south_lat, xx[2])
                 pos_eq_south = swe.cotrans(pos_ecl_south, swe.FLG_EQUATORIAL)
-                planet_positions['Ke'] = {'lon': south_lon, 'lat': south_lat, 'speed': xx[3], 'ra': pos_eq_south[0], 'dec': pos_eq_south[1]}
+                planet_positions['Ke'] = {'lon': south_lon, 'lat': south_lat, 'speed': xx[3], 'ra': pos_eq_south[0], 'dec': pos_eq_south[1], 'dec_speed': -xx_eq[4]}
 
 
     # 5. 计算宫位位置
@@ -253,7 +253,7 @@ def calculate_positions(
             pos_ecl = (final_lon, 0.0, 1.0)
             pos_eq = swe.cotrans(pos_ecl, swe.FLG_EQUATORIAL)
             # 注意：这里的 'lon' 用的是 final_lon
-            house_positions[f"house {i+1}"] = {'lon': final_lon, 'lat': 0.0, 'speed': current_speed, 'ra': pos_eq[0], 'dec': pos_eq[1]}
+            house_positions[f"house {i+1}"] = {'lon': final_lon, 'lat': 0.0, 'speed': current_speed, 'ra': pos_eq[0], 'dec': pos_eq[1], 'dec_speed': 0.0}
 
 
     # ----------------- [新增] 按照用户配置顺序重组字典 -----------------

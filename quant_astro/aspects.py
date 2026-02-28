@@ -133,6 +133,37 @@ def is_applying(p1_data, p2_data, target_angle):
     else:
         return 'S' # Separating
 
+def is_applying_dec(p1_data, p2_data, is_contra):
+    """
+    判断赤纬是入相位(A)还是出相位(S)
+    逻辑：线性预测。平行时目标差距为0，反平行时目标差距(绝对值之和)也趋近0。
+    """
+    d1, s1 = p1_data.get('dec', 0), p1_data.get('dec_speed', 0)
+    d2, s2 = p2_data.get('dec', 0), p2_data.get('dec_speed', 0)
+    
+    dt = 1.0 / 1440.0 # 预测 1分钟 后
+
+    if is_contra:
+        # 反平行：一南一北，看两者绝对值的差距是否在缩小
+        curr_err = abs(abs(d1) - abs(d2))
+        d1_next = d1 + s1 * dt
+        d2_next = d2 + s2 * dt
+        next_err = abs(abs(d1_next) - abs(d2_next))
+    else:
+        # 平行：同南或同北，看两者的实际差值是否在缩小
+        curr_err = abs(d1 - d2)
+        d1_next = d1 + s1 * dt
+        d2_next = d2 + s2 * dt
+        next_err = abs(d1_next - d2_next)
+        
+    if abs(next_err - curr_err) < 1e-9:
+        return 'E' if curr_err < 0.001 else 'S'
+        
+    if next_err < curr_err:
+        return 'A'
+    else:
+        return 'S'
+
 # ----------------- 核心计算逻辑 -----------------
 
 def calculate_aspects(planet_pos, house_pos, aspect_config):
@@ -151,6 +182,13 @@ def calculate_aspects(planet_pos, house_pos, aspect_config):
     orb_settings = parse_orb_config(aspect_config.get('orb_config_str', ''))
     active_houses = aspect_config.get('active_houses', []) # list of ints
     custom_aspects = parse_aspect_types(aspect_config.get('aspect_types', []))
+    
+    # [新增] 提取赤纬相位配置
+    dec_config = aspect_config.get('declination', {})
+    enable_dec = dec_config.get('is_active', False)
+    dec_orb = dec_config.get('orb', 1.2)
+    parallel_sym = dec_config.get('parallel_sym', '∥')
+    contra_sym = dec_config.get('contra_sym', '∦')
     
     # 准备参与计算的实体列表
     # 注意：输入到这里的 planet_pos 已经是过滤过的了
@@ -212,6 +250,33 @@ def calculate_aspects(planet_pos, house_pos, aspect_config):
                             'orb': round(diff, 10), # 误差
                             'state': is_app
                         })
+
+                # ================= [新增] 赤纬平行/反平行计算 =================
+                if enable_dec:
+                    dec1 = b1['data'].get('dec', 0)
+                    dec2 = b2['data'].get('dec', 0)
+                    
+                    # 1. 判断同纬(平行)还是异纬(反平行)
+                    is_same_hemisphere = (dec1 * dec2) >= 0
+                    
+                    # 2. 无论南北，只看绝对值的差异
+                    dec_diff = abs(abs(dec1) - abs(dec2)) 
+                    
+                    if dec_diff <= dec_orb:
+                        is_contra = not is_same_hemisphere
+                        sym = contra_sym if is_contra else parallel_sym
+                        state = is_applying_dec(b1['data'], b2['data'], is_contra)
+                        
+                        orb_results.append({
+                            'p1': b1['name'],
+                            'p2': b2['name'],
+                            'type': sym,
+                            'angle_def': 0.0, # 赤纬没有基准角度，只用 0 代表绝对平行
+                            'actual_dist': round(dec_diff, 10), 
+                            'orb': round(dec_diff, 10), 
+                            'state': state
+                        })
+                # =============================================================
         results['orb_mode'] = orb_results
 
     # --- 2. 整宫制模式 (Whole Sign) ---

@@ -118,12 +118,18 @@ planet_pos, house_pos, ascmc_tuple, jd, dignities = qa.calculate_positions(
     **calculation_options
 )
 
-# 专业点和自定义点计算
-prof_points, cust_points = qa.calculate_special_points(ascmc_tuple, custom_points_config)
-
+# ----------------- 属性计算：获取星座、落宫、宫主星 -----------------
+# 这是一个新步骤，调用 attributes.py 中的逻辑
+planet_signs, house_signs, planet_houses, house_lords = qa.get_attributes(
+    planet_pos,
+    house_pos
+)
 
 # 日出与值日星
 sunrise_results = qa.get_sun_rise_and_lord(birth_config, sunrise_config)
+
+# ----------------- 行星时 -----------------
+planetary_hour_data = qa.get_planetary_hour(birth_config, sunrise_config)
 
 # KP计算
 # 1. 获取KP星主
@@ -210,6 +216,30 @@ create_dasha_table(planet_pos, birth_config, dasa_config)
 
 # ----------------- 检查所有原始结果词典 -----------------
 
+print("\n" + "="*20 + " 行星原始位置字典 (planet_pos) " + "="*20)
+for key, value in planet_pos.items():
+    print(f"{key}: {value}")
+
+print("\n" + "="*20 + " 宫头原始位置字典 (house_pos) " + "="*20)
+for key, value in house_pos.items():
+    print(f"{key}: {value}")
+
+print("\n" + "="*20 + " 字典1：行星的星座归属 (planet_signs) " + "="*20)
+for key, value in planet_signs.items():
+    print(f"{key}: {value}")
+
+print("\n" + "="*20 + " 字典2：宫位的星座归属 (house_signs) " + "="*20)
+for key, value in house_signs.items():
+    print(f"{key}: {value}")
+
+print("\n" + "="*20 + " 字典3：行星的宫位归属 (planet_houses) " + "="*20)
+for key, value in planet_houses.items():
+    print(f"{key}: {value}")
+
+print("\n" + "="*20 + " 字典4：每个宫位的主宰星 (house_lords) " + "="*20)
+for key, value in house_lords.items():
+    print(f"{key}: {value}")
+
 print("="*20 + " KP行星结果字典 (kp_planet_results) " + "="*20)
 for key, value in kp_planet_results.items():
     print(f"{key}: {value}")
@@ -229,12 +259,8 @@ for key, value in kp_house_sigs.items():
 print("\n" + "="*20 + " 主宰星字典 (kp_ruling_planets) " + "="*20)
 print(kp_ruling_planets)
 
-print("\n" + "="*20 + " 行星原始位置字典 (planet_pos) " + "="*20)
-for key, value in planet_pos.items():
-    print(f"{key}: {value}")
-
-print("\n" + "="*20 + " 宫头原始位置字典 (house_pos) " + "="*20)
-for key, value in house_pos.items():
+print("\n" + "="*20 + " 行星时数据 (Planetary Hour) " + "="*20)
+for key, value in planetary_hour_data.items():
     print(f"{key}: {value}")
 
 # === 【新增】打印庙旺陷落表 ===
