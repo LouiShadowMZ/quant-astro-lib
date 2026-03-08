@@ -123,7 +123,13 @@ def calculate_positions(
     planet_map = {
         swe.SUN: 'Su', swe.MOON: 'Mo', swe.MERCURY: 'Me', swe.VENUS: 'Ve',
         swe.MARS: 'Ma', swe.JUPITER: 'Ju', swe.SATURN: 'Sa', swe.URANUS: 'Ur',
-        swe.NEPTUNE: 'Ne', swe.PLUTO: 'Pl', node_flag: 'Ra'
+        swe.NEPTUNE: 'Ne', swe.PLUTO: 'Pl', node_flag: 'Ra',
+        # === 新增五大小行星 ===
+        swe.CHIRON: 'Ch',  # 凯龙星
+        swe.CERES: 'Ce',   # 谷神星
+        swe.PALLAS: 'Pa',  # 智神星
+        swe.JUNO: 'Jn',    # 婚神星 (注: Ju被木星占了, 所以用Jn)
+        swe.VESTA: 'Vs'    # 灶神星 (注: Ve被金星占了, 所以用Vs)
     }
 
     # 获取用户选择的行星列表，如果未提供则默认为 None (即全选)
@@ -157,7 +163,7 @@ def calculate_positions(
             if name == 'Su':
                 calc_p_id = swe.EARTH # 太阳在底层偷偷替身为地球，但字典的键名(name)仍保持为'Su'
                 calc_flag = flag | swe.FLG_HELCTR # 叠加日心制标识
-            elif name in['Me', 'Ve', 'Ma', 'Ju', 'Sa', 'Ur', 'Ne', 'Pl']:
+            elif name in['Me', 'Ve', 'Ma', 'Ju', 'Sa', 'Ur', 'Ne', 'Pl', 'Ch', 'Ce', 'Pa', 'Jn', 'Vs']:
                 calc_flag = flag | swe.FLG_HELCTR # 八大行星叠加日心制标识
             # 月亮('Mo')和交点('Ra', 'Ke')什么都不做，自动保持默认的原汁原味地心制
 
