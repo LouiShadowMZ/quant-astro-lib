@@ -148,8 +148,23 @@ def calculate_positions(
         # 逻辑：只要不是南北交点(Ra/Ke)，且在我们的配置表中存在，就加入结果
         # ------------------------------------
 
-        xx, _ = swe.calc_ut(jd_utc, p_id, flag)
-        xx_eq, _ = swe.calc_ut(jd_utc, p_id, flag | swe.FLG_EQUATORIAL)
+        # === 【新增】日心地心混合盘动态标识逻辑 ===
+        use_heliocentric = kwargs.get('USE_HELIOCENTRIC', False)
+        calc_flag = flag  # 默认使用基础地心 flag
+        calc_p_id = p_id  # 默认使用循环当前的星体 ID
+
+        if use_heliocentric:
+            if name == 'Su':
+                calc_p_id = swe.EARTH # 太阳在底层偷偷替身为地球，但字典的键名(name)仍保持为'Su'
+                calc_flag = flag | swe.FLG_HELCTR # 叠加日心制标识
+            elif name in['Me', 'Ve', 'Ma', 'Ju', 'Sa', 'Ur', 'Ne', 'Pl']:
+                calc_flag = flag | swe.FLG_HELCTR # 八大行星叠加日心制标识
+            # 月亮('Mo')和交点('Ra', 'Ke')什么都不做，自动保持默认的原汁原味地心制
+
+        # 使用动态调整后的参数进行最终计算
+        xx, _ = swe.calc_ut(jd_utc, calc_p_id, calc_flag)
+        xx_eq, _ = swe.calc_ut(jd_utc, calc_p_id, calc_flag | swe.FLG_EQUATORIAL)
+        # ==========================================
         
         # 存储逻辑：检查是否需要保存该具体行星
         # 对于普通行星和 Ra：
