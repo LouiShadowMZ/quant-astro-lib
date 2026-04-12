@@ -7,7 +7,7 @@ import re
 import pkg_resources
 import pandas as pd
 
-# --- 占星基础数据：庙旺陷落表 (含三王星) ---
+# --- 占星基础数据：庙旺陷落表 ---
 PLANET_DIGNITIES = {
     'Su': {'Dom': ['Leo'], 'Exalt': ['Ari'], 'Det': ['Aqr'], 'Fall': ['Lib']},
     'Mo': {'Dom': ['Cnc'], 'Exalt': ['Tau'], 'Det': ['Cap'], 'Fall': ['Sco']},
