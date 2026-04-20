@@ -316,55 +316,76 @@ window.renderAstroChart = function (CHART_DATA) {
         }
 
         // ============================================================
-        // 防碰撞算法 (完全复刻，一行未改)
+
+
+        // ============================================================
+        // 防碰撞算法 (升级版：全局迭代松弛/弹簧斥力算法 - 完全动态自适应版)
         // ============================================================
         function solvePlanetCollisions(planets) {
             let active = planets.filter(p => getPlanetStyle(p.name).visible !== false);
             if (active.length === 0) return [];
 
-            let pList = active.map(p => ({ ...p, render_lon: p.abs_lon })).sort((a, b) => a.render_lon - b.render_lon);
-            const MIN_DIST = SETTINGS.collisionMinDist;
-            let clusters = [];
+            // 1. 初始化每个行星的渲染经度
+            let pList = active.map(p => ({ ...p, render_lon: p.abs_lon }));
 
-            if (pList.length > 0) {
-                let current = [pList[0]];
-                clusters.push(current);
-                for (let i = 1; i < pList.length; i++) {
-                    let prev = pList[i - 1];
-                    let curr = pList[i];
-                    if ((curr.render_lon - prev.render_lon) < MIN_DIST) {
-                        current.push(curr);
-                    } else {
-                        current = [curr];
-                        clusters.push(current);
+            // 2. 完全释放控制权：摒弃所有硬编码
+            // 默认直接使用你在外部传入的 SETTINGS.collisionMinDist
+            let TARGET_DIST = SETTINGS.collisionMinDist;
+
+            // 【动态自适应加持】: 
+            // 因为弧长(物理像素) = 角度 * (π/180) * 半径
+            // 如果你在 ASTRO_STYLE.settings 中定义了具体的排斥物理像素宽度 (如 dynamicPixelGap: 35)
+            // 算法会根据最内侧文字所在的动态半径，自动计算并覆盖真正所需的排斥角度。
+            if (SETTINGS.dynamicPixelGap) {
+                // 动态寻找当前使用到的最内圈行星带半径
+                const innerRadius = RADII.r8 || RADII.r7 || 200;
+                TARGET_DIST = (SETTINGS.dynamicPixelGap / innerRadius) * (180 / Math.PI);
+            }
+
+            const MAX_ITER = 100; // 最大迭代次数，确保 O(N) 级别内收敛
+            let hasCollision = true;
+
+            // 3. 核心：全局扫描并施加双向斥力，直到所有星体夹角绝对 >= TARGET_DIST
+            for (let iter = 0; iter < MAX_ITER && hasCollision; iter++) {
+                hasCollision = false;
+
+                // 每次迭代前依据当前渲染经度排序，维持正确的环形拓扑关系
+                pList.sort((a, b) => a.render_lon - b.render_lon);
+
+                for (let i = 0; i < pList.length; i++) {
+                    let j = (i + 1) % pList.length;
+                    let p1 = pList[i];
+                    let p2 = pList[j];
+
+                    // 计算相对夹角，处理 360 度圆环跨界
+                    let dist = p2.render_lon - p1.render_lon;
+                    if (dist < 0) dist += 360;
+
+                    // 检测到碰撞
+                    if (dist < TARGET_DIST) {
+                        hasCollision = true;
+
+                        let overlap = TARGET_DIST - dist;
+                        let pushAmount = overlap / 2;
+
+                        // 弹簧斥力：各自向反方向推移一半的重叠量
+                        p1.render_lon -= pushAmount;
+                        p2.render_lon += pushAmount;
+
+                        // 确保坐标规范化在 0-360 范围内
+                        p1.render_lon = (p1.render_lon + 360) % 360;
+                        p2.render_lon = (p2.render_lon + 360) % 360;
                     }
                 }
             }
-            if (clusters.length > 1) {
-                let firstC = clusters[0];
-                let lastC = clusters[clusters.length - 1];
-                let gap = (firstC[0].render_lon + 360) - lastC[lastC.length - 1].render_lon;
-                if (gap < MIN_DIST) {
-                    firstC.forEach(p => p.render_lon += 360);
-                    let combined = lastC.concat(firstC);
-                    spreadCluster(combined, MIN_DIST);
-                    combined.forEach(p => p.render_lon %= 360);
-                    clusters.shift();
-                }
-            }
-            clusters.forEach(c => spreadCluster(c, MIN_DIST));
+
+            // 返回最终无碰撞坐标前最后排序一次
+            pList.sort((a, b) => a.render_lon - b.render_lon);
             return pList;
         }
+        // 注意：原先废弃的 spreadCluster 函数已经被彻底删除
 
-        function spreadCluster(cluster, minDist) {
-            if (cluster.length <= 1) return;
-            let sumLon = 0;
-            cluster.forEach(p => sumLon += p.render_lon);
-            let avgLon = sumLon / cluster.length;
-            let totalSpan = (cluster.length - 1) * minDist;
-            let startLon = avgLon - (totalSpan / 2);
-            cluster.forEach((p, idx) => p.render_lon = startLon + (idx * minDist));
-        }
+
 
         // ============================================================
         // 绘图逻辑 (Draw Loop)
@@ -392,9 +413,8 @@ window.renderAstroChart = function (CHART_DATA) {
             svg.appendChild(SvgBuilder.createCircle(r, "none", "stroke-main"));
         });
 
-        // 4. 绘制宫头文字 (星座、度数)
-        const arcSpread = SETTINGS.arcSpread; // 弧度间距 (用于Canvas)，这里我们需要转回角度
-        // 简单估算：0.09 弧度 ≈ 5 度
+        // 4. 绘制宫头文字 (星座、度数) - 包含下半球视觉矫正
+        const arcSpread = SETTINGS.arcSpread;
         const textSpreadDeg = 5;
 
         CHART_DATA.houses.forEach(h => {
@@ -402,17 +422,24 @@ window.renderAstroChart = function (CHART_DATA) {
             const z = h.zodiac;
             const eleColor = getSignColor(z.sign_idx);
 
-            // A. 星座符号 (中间)
+            // A. 星座符号 (始终居中)
             const pSign = getPos(centerLon, RADII.r2);
             svg.appendChild(SvgBuilder.createText(z.sign_sym, pSign.x, pSign.y, eleColor, "24px"));
 
-            // B. 分 (右侧/逆时针侧) -> 减度数
-            const pMin = getPos(centerLon - textSpreadDeg, RADII.r2);
-            svg.appendChild(SvgBuilder.createText(z.min + "′", pMin.x, pMin.y, COLORS.textDim, "25px"));
+            // 计算左右两侧的虚拟锚点
+            const pLeft = getPos(centerLon + textSpreadDeg, RADII.r2);  // 顺时针侧
+            const pRight = getPos(centerLon - textSpreadDeg, RADII.r2); // 逆时针侧
 
-            // C. 度 (左侧/顺时针侧) -> 加度数
-            const pDeg = getPos(centerLon + textSpreadDeg, RADII.r2);
-            svg.appendChild(SvgBuilder.createText(z.deg + "°", pDeg.x, pDeg.y, COLORS.textMain, "25px"));
+            // B/C. 核心判断：一宫到六宫执行度分互换，保证视觉顺畅
+            if (h.id >= 1 && h.id <= 6) {
+                // 1-6宫：互换位置 (左分右度)
+                svg.appendChild(SvgBuilder.createText(z.min + "′", pLeft.x, pLeft.y, COLORS.textDim, "25px"));
+                svg.appendChild(SvgBuilder.createText(z.deg + "°", pRight.x, pRight.y, COLORS.textMain, "25px"));
+            } else {
+                // 7-12宫：保持原本的默认顺序 (左度右分)
+                svg.appendChild(SvgBuilder.createText(z.deg + "°", pLeft.x, pLeft.y, COLORS.textMain, "25px"));
+                svg.appendChild(SvgBuilder.createText(z.min + "′", pRight.x, pRight.y, COLORS.textDim, "25px"));
+            }
         });
 
         // 5. 绘制行星 (核心数据)
