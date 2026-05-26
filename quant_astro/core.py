@@ -131,18 +131,21 @@ def calculate_positions(
 
     # 获取用户选择的行星列表，如果未提供则默认为 None (即全选)
     selected_planets = kwargs.get('selected_planets', None)
+    
+    # 定义小行星集合：这些星体无论 selected_planets 怎么配置，都强制计算
+    MINOR_PLANET_NAMES = {'Ch', 'Ce', 'Pa', 'Jn', 'Vs'}
 
     for p_id, name in planet_map.items():
-        # --- 过滤逻辑：判断是否需要计算该星体 ---
         should_calc = False
         if selected_planets is None or 'All' in selected_planets:
             should_calc = True
         else:
-            # 如果是列表中的普通行星，则计算
             if name in selected_planets:
                 should_calc = True
-            # 特殊逻辑：如果是交点(Ra/Ke)，只要列表里有 Ra 或 Ke 任意一个，就必须进行核心计算
             if p_id == node_flag and ('Ra' in selected_planets or 'Ke' in selected_planets):
+                should_calc = True
+            # 小行星豁免：只要在小行星集合里，强制计算，不受 selected_planets 过滤
+            if name in MINOR_PLANET_NAMES:
                 should_calc = True
         
         if not should_calc:
