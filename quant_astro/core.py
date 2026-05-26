@@ -7,6 +7,17 @@ import re
 import pkg_resources
 import pandas as pd
 
+# --- 小行星目录：代码简写 -> swisseph 内置常量 ---
+# 这6个是 swisseph 标准发行版内置的，不需要额外星历文件
+MINOR_PLANET_CATALOG = {
+    'Ch': swe.CHIRON,   # 2060 凯龙星
+    'Ph': swe.PHOLUS,   # 5145 福禄斯
+    'Ce': swe.CERES,    # 1 谷神星
+    'Pa': swe.PALLAS,   # 2 智神星
+    'Jn': swe.JUNO,     # 3 婚神星
+    'Vs': swe.VESTA,    # 4 灶神星
+}
+
 # --- 占星基础数据：庙旺陷落表 ---
 PLANET_DIGNITIES = {
     'Su': {'Dom': ['Leo'], 'Exalt': ['Ari'], 'Det': ['Aqr'], 'Fall': ['Lib']},
@@ -120,20 +131,21 @@ def calculate_positions(
     # ----------------- [修改结束] -----------------
 
     node_flag = swe.TRUE_NODE if node_mode == 'true' else swe.MEAN_NODE
+    # 主行星（固定，不受配置影响）
     planet_map = {
         swe.SUN: 'Su', swe.MOON: 'Mo', swe.MERCURY: 'Me', swe.VENUS: 'Ve',
         swe.MARS: 'Ma', swe.JUPITER: 'Ju', swe.SATURN: 'Sa', swe.URANUS: 'Ur',
-        swe.NEPTUNE: 'Ne', swe.PLUTO: 'Pl', node_flag: 'Ra',
-        # --- 以下是新增的小行星，ID 是 swisseph 内置常量 ---
-        swe.CHIRON: 'Ch', swe.CERES: 'Ce', swe.PALLAS: 'Pa',
-        swe.JUNO: 'Jn', swe.VESTA: 'Vs'
+        swe.NEPTUNE: 'Ne', swe.PLUTO: 'Pl', node_flag: 'Ra'
     }
+
+    # 小行星（根据配置动态添加）
+    selected_minor_planets = kwargs.get('selected_minor_planets', [])
+    for code in selected_minor_planets:
+        if code in MINOR_PLANET_CATALOG:
+            planet_map[MINOR_PLANET_CATALOG[code]] = code
 
     # 获取用户选择的行星列表，如果未提供则默认为 None (即全选)
     selected_planets = kwargs.get('selected_planets', None)
-    
-    # 定义小行星集合：这些星体无论 selected_planets 怎么配置，都强制计算
-    MINOR_PLANET_NAMES = {'Ch', 'Ce', 'Pa', 'Jn', 'Vs'}
 
     for p_id, name in planet_map.items():
         should_calc = False
@@ -143,9 +155,6 @@ def calculate_positions(
             if name in selected_planets:
                 should_calc = True
             if p_id == node_flag and ('Ra' in selected_planets or 'Ke' in selected_planets):
-                should_calc = True
-            # 小行星豁免：只要在小行星集合里，强制计算，不受 selected_planets 过滤
-            if name in MINOR_PLANET_NAMES:
                 should_calc = True
         
         if not should_calc:
