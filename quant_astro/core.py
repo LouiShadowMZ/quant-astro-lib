@@ -156,6 +156,9 @@ def calculate_positions(
                 should_calc = True
             if p_id == node_flag and ('Ra' in selected_planets or 'Ke' in selected_planets):
                 should_calc = True
+                # 小行星豁免：在 selected_minor_planets 配置里的星体，跳过主行星过滤
+            if name in selected_minor_planets:
+                should_calc = True
         
         if not should_calc:
             continue
