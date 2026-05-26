@@ -1,7 +1,7 @@
 # quant_astro/__init__.py
 
 # 核心计算逻辑
-from .core import calculate_positions, decimal_to_dms
+from .core import calculate_positions, decimal_to_dms, calculate_fixed_stars
 from .attributes import get_attributes, get_sun_rise_and_lord, get_planetary_hour
 from .points import calculate_special_points
 from .kp import get_kp_lords, get_significators, get_ruling_planets

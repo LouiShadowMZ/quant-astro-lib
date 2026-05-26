@@ -123,7 +123,10 @@ def calculate_positions(
     planet_map = {
         swe.SUN: 'Su', swe.MOON: 'Mo', swe.MERCURY: 'Me', swe.VENUS: 'Ve',
         swe.MARS: 'Ma', swe.JUPITER: 'Ju', swe.SATURN: 'Sa', swe.URANUS: 'Ur',
-        swe.NEPTUNE: 'Ne', swe.PLUTO: 'Pl', node_flag: 'Ra'
+        swe.NEPTUNE: 'Ne', swe.PLUTO: 'Pl', node_flag: 'Ra',
+        # --- 以下是新增的小行星，ID 是 swisseph 内置常量 ---
+        swe.CHIRON: 'Ch', swe.CERES: 'Ce', swe.PALLAS: 'Pa',
+        swe.JUNO: 'Jn', swe.VESTA: 'Vs'
     }
 
     # 获取用户选择的行星列表，如果未提供则默认为 None (即全选)
@@ -270,8 +273,23 @@ def calculate_positions(
                 ordered_pos[k] = v
         planet_positions = ordered_pos
     # ----------------- [新增结束] -----------------
+
+    # ----------------- [新增] 把字典分拣成"主行星"和"小行星"两个 -----------------
+    # 定义哪些 key 属于主行星（七大行星 + 三王星 + 罗睺计都）
+    MAIN_PLANETS = {'Su', 'Mo', 'Me', 'Ve', 'Ma', 'Ju', 'Sa', 'Ur', 'Ne', 'Pl', 'Ra', 'Ke'}
+
+    # 遍历完整字典，按 key 分拣到两个新字典里
+    main_planet_positions = {}
+    minor_planet_positions = {}
+
+    for key, value in planet_positions.items():
+        if key in MAIN_PLANETS:
+            main_planet_positions[key] = value
+        else:
+            minor_planet_positions[key] = value
+    # ----------------- [分拣结束] -----------------
     
-    return planet_positions, house_positions, ascmc, jd_utc, dignity_results
+    return main_planet_positions, house_positions, ascmc, jd_utc, dignity_results, minor_planet_positions
 
 
     # ----------------- [新增] 独立计算函数：日出与值日星 -----------------
@@ -398,3 +416,59 @@ def get_sun_rise_and_lord(birth_config, sunrise_config):
         'day_lord': chaldean_map.get(effective_weekday, 'Unknown'),
         'is_before_sunrise': local_dt < rise_dt_local
     }
+
+# ----------------- [新增] 独立函数：计算恒星位置 -----------------
+def calculate_fixed_stars(jd_utc, selected_stars, ecliptic_mode='tropical', ayanamsha_mode='SIDM_KRISHNAMURTI'):
+    """
+    计算给定儒略日下，一组恒星的位置。
+    返回格式与 planet_positions 完全一致。
+
+    参数：
+        jd_utc         : 儒略日（直接从 calculate_positions 的返回值里取）
+        selected_stars : 一个列表，每项是恒星名字字符串，例如 ['Sirius', 'Spica', 'Regulus']
+        ecliptic_mode  : 黄道模式，与主计算保持一致
+        ayanamsha_mode : 岁差体系，与主计算保持一致
+    """
+    # --- 第一步：根据黄道模式决定 flag ---
+    # 这和 calculate_positions 里的逻辑完全一样
+    if ecliptic_mode == 'sidereal':
+        # 如果用的是恒星黄道，先把岁差模式设置好
+        if isinstance(ayanamsha_mode, str):
+            clean_name = ayanamsha_mode.replace("swe.", "").strip()
+            if hasattr(swe, clean_name):
+                swe.set_sid_mode(getattr(swe, clean_name))
+        flag = swe.FLG_SIDEREAL | swe.FLG_SWIEPH | swe.FLG_SPEED
+    else:
+        flag = swe.FLG_SWIEPH | swe.FLG_SPEED
+
+    # --- 第二步：循环计算每颗恒星 ---
+    fixed_star_positions = {}
+
+    for star_name in selected_stars:
+        try:
+            # 黄道坐标：调用 fixstar2_ut
+            # 注意返回值是三个：(xx元组, 恒星完整名字, 返回码)
+            # 这和 calc_ut 的两个返回值不同！
+            xx, returned_name, ret_flag = swe.fixstar2_ut(star_name, jd_utc, flag)
+
+            # 赤道坐标：加上 FLG_EQUATORIAL 标志位再调用一次
+            xx_eq, _, _ = swe.fixstar2_ut(star_name, jd_utc, flag | swe.FLG_EQUATORIAL)
+
+            # 存入字典，格式与 planet_positions 完全一致
+            # 注意：恒星的 speed 和 dec_speed 极其接近 0，是正常现象
+            fixed_star_positions[star_name] = {
+                'lon':       xx[0] % 360,
+                'lat':       xx[1],
+                'speed':     xx[3],
+                'ra':        xx_eq[0],
+                'dec':       xx_eq[1],
+                'dec_speed': xx_eq[4]
+            }
+
+        except Exception as e:
+            # 如果某颗星名字写错了或找不到，跳过并打印提示，不影响其他星
+            print(f"⚠️ 恒星 '{star_name}' 计算失败，已跳过。原因：{e}")
+            continue
+
+    return fixed_star_positions
+# ----------------- [恒星函数结束] -----------------
