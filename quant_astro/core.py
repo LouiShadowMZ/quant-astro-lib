@@ -50,8 +50,16 @@ def decimal_to_dms(deg_float):
 
 # (从你原始代码中提取的辅助函数)
 def _parse_dms(dms_str):
+    # 1. 提取出度、分、秒的纯数字
     parts = re.findall(r"[\d.]+", dms_str)
-    return float(parts[0]) + float(parts[1])/60 + float(parts[2])/3600
+    
+    # 2. 先计算出坐标的十进制绝对值
+    absolute_deg = float(parts[0]) + float(parts[1])/60 + float(parts[2])/3600
+    
+    # 3. 捕捉负号：如果输入字符串中带有负号（代表西经或南纬），则转换为负数
+    if '-' in dms_str:
+        return -absolute_deg
+    return absolute_deg
 
 def _parse_timezone(tz_str):
     match = re.match(r'^([+-]?)(\d{1,2})(:?)(\d{0,2})$', tz_str)
