@@ -49,74 +49,75 @@ PTOLEMAIC_BOUNDS = {
 # --- 阿拉伯点计算规则 (昼夜公式映射) ---
 # 通用公式：lot = ASC + A - B
 # day/night 元组：(A, B)
+# [修改] 已去掉所有 "Lot of " 前缀，键名直接使用点名本身
 LOT_RULES = {
-    "Lot of Fortune": {
+    "Fortune": {
         "day":   ("Mo", "Su"),
         "night": ("Su", "Mo"),
     },
-    "Lot of Spirit": {
+    "Spirit": {
         "day":   ("Su", "Mo"),
         "night": ("Mo", "Su"),
     },
-    "Lot of Necessity": {
-        "day":   ("Lot of Fortune", "Lot of Spirit"),
-        "night": ("Lot of Spirit", "Lot of Fortune"),
+    "Necessity": {
+        "day":   ("Fortune", "Spirit"),
+        "night": ("Spirit", "Fortune"),
     },
-    "Lot of Eros": {
-        "day":   ("Lot of Spirit", "Lot of Fortune"),
-        "night": ("Lot of Fortune", "Lot of Spirit"),
+    "Eros": {
+        "day":   ("Spirit", "Fortune"),
+        "night": ("Fortune", "Spirit"),
     },
-    "Lot of Courage": {
-        "day":   ("Lot of Fortune", "Ma"),
-        "night": ("Ma", "Lot of Fortune"),
+    "Courage": {
+        "day":   ("Fortune", "Ma"),
+        "night": ("Ma", "Fortune"),
     },
-    "Lot of Victory": {
-        "day":   ("Ju", "Lot of Spirit"),
-        "night": ("Lot of Spirit", "Ju"),
+    "Victory": {
+        "day":   ("Ju", "Spirit"),
+        "night": ("Spirit", "Ju"),
     },
-    "Lot of Nemesis": {
-        "day":   ("Lot of Fortune", "Sa"),
-        "night": ("Sa", "Lot of Fortune"),
+    "Nemesis": {
+        "day":   ("Fortune", "Sa"),
+        "night": ("Sa", "Fortune"),
     },
-    "Lot of the Father": {
+    "the Father": {
         "day":   ("Sa", "Su"),
         "night": ("Su", "Sa"),
     },
-    "Lot of the Mother": {
+    "the Mother": {
         "day":   ("Mo", "Ve"),
         "night": ("Ve", "Mo"),
     },
-    "Lot of Siblings": {
+    "Siblings": {
         "day":   ("Ju", "Sa"),
         "night": ("Sa", "Ju"),
     },
-    "Lot of Children": {
+    "Children": {
         "day":   ("Sa", "Ju"),
         "night": ("Ju", "Sa"),
     },
-    "Lot of Marriage": {
+    "Marriage": {
         "day":   ("Ve", "Ju"),
         "night": ("Ju", "Ve"),
     },
-    "Lot of Exaltation": {
+    "Exaltation": {
         # 昼：ASC + 19°(太阳旺位·白羊19°) - 太阳
         # 夜：ASC + 33°(月亮旺位·金牛3°)  - 月亮
         "day":   ("const_19", "Su"),
         "night": ("const_33", "Mo"),
     },
-    "Lot of Basis": {
+    "Basis": {
         # 需要特殊计算逻辑，见下方 special == "basis" 分支
         "special": "basis",
     },
-    "Lot of Debt": {
+    "Debt": {
         "day":   ("Sa", "Me"),
         "night": ("Me", "Sa"),
     },
-    "Lot of Chronic Illness": {
+    "Chronic Illness": {
         "day":   ("Ma", "Sa"),
         "night": ("Sa", "Ma"),
     },
-    "Lot of Death": {
+    "Death": {
         "day":   ("house 8", "Mo"),
         "night": ("Mo", "house 8"),
     },
@@ -275,7 +276,7 @@ def get_attributes(
         house_positions        : core.py 返回的宫头字典
         jd                     : 儒略日（用于精确计算黄赤交角，强烈建议传入）
         selected_lots          : 选择输出哪些阿拉伯点
-                                 "all" = 全部；或传列表，如 ["Lot of Fortune", "Lot of Spirit"]
+                                 "all" = 全部；或传列表，如 ["Fortune", "Spirit"]
         lot_method             : 日夜判断方式
                                  "sect"      = 自动（根据太阳是否在地平线以下判断）
                                  "diurnal"   = 强制白天盘
@@ -290,8 +291,15 @@ def get_attributes(
         minor_planet_positions_new  小行星  （含 bound、face；若未传入则为空字典）
         fixed_star_positions_new    恒星    （含 bound、face；若未传入则为空字典）
         arabic_parts                阿拉伯点（含 bound、face）
-        antiscia                    映点    （含 bound、face；覆盖主行星/宫头/小行星/恒星/阿拉伯点）
+        antiscia                    映点    （嵌套字典，含 planets/houses/minor_planets/fixed_stars/arabic_parts 五个子字典）
         contra_antiscia             反映点  （同上）
+
+    访问示例：
+        antiscia['planets']['Su']            # 太阳的映点
+        antiscia['houses']['house 1']        # 1宫宫头的映点
+        antiscia['arabic_parts']['Fortune']  # 幸运点的映点
+        antiscia['minor_planets']['Ch']      # 凯龙星的映点
+        antiscia['fixed_stars']['Sirius,alCMa']  # 天狼星的映点
     """
 
     # =========================================================================
@@ -340,43 +348,44 @@ def get_attributes(
             is_day = not is_below_horizon(sun_lon, asc_lon)
 
         # 必须按此顺序计算，保证依赖前置（Necessity 依赖 Fortune 和 Spirit 等）
+        # [修改] 已去掉所有 "Lot of " 前缀
         calculation_order = [
-            "Lot of Fortune",
-            "Lot of Spirit",
-            "Lot of Necessity",
-            "Lot of Eros",
-            "Lot of Courage",
-            "Lot of Victory",
-            "Lot of Nemesis",
-            "Lot of the Father",
-            "Lot of the Mother",
-            "Lot of Siblings",
-            "Lot of Children",
-            "Lot of Marriage",
-            "Lot of Exaltation",
-            "Lot of Basis",
-            "Lot of Debt",
-            "Lot of Chronic Illness",
-            "Lot of Death",
+            "Fortune",
+            "Spirit",
+            "Necessity",
+            "Eros",
+            "Courage",
+            "Victory",
+            "Nemesis",
+            "the Father",
+            "the Mother",
+            "Siblings",
+            "Children",
+            "Marriage",
+            "Exaltation",
+            "Basis",
+            "Debt",
+            "Chronic Illness",
+            "Death",
         ]
 
         for lot_name in calculation_order:
             rule_info = LOT_RULES.get(lot_name, {})
 
             # -----------------------------------------------------------------
-            # 特殊处理：基础点（Lot of Basis）
+            # 特殊处理：基础点（Basis）
             # 取 (ASC + Fortune - Spirit) 与 (ASC + Spirit - Fortune) 中
             # 落在地平线以下（Houses 1-6）的那一个。
             # -----------------------------------------------------------------
             if rule_info.get("special") == "basis":
                 if (
-                    "Lot of Fortune" in temp_lots
-                    and "Lot of Spirit" in temp_lots
+                    "Fortune" in temp_lots
+                    and "Spirit" in temp_lots
                 ):
-                    fort_lon   = temp_lots["Lot of Fortune"]["lon"]
-                    fort_speed = temp_lots["Lot of Fortune"]["speed"]
-                    spir_lon   = temp_lots["Lot of Spirit"]["lon"]
-                    spir_speed = temp_lots["Lot of Spirit"]["speed"]
+                    fort_lon   = temp_lots["Fortune"]["lon"]
+                    fort_speed = temp_lots["Fortune"]["speed"]
+                    spir_lon   = temp_lots["Spirit"]["lon"]
+                    spir_speed = temp_lots["Spirit"]["speed"]
 
                     cand1_lon   = (asc_lon + fort_lon - spir_lon) % 360.0
                     cand1_speed = asc_speed + fort_speed - spir_speed
@@ -401,7 +410,8 @@ def get_attributes(
             current_rule = rule_info.get("day") if is_day else rule_info.get("night")
 
             # 父亲点：土星燃烧（与太阳相距 17° 以内）时，改用木星-火星公式
-            if lot_name == "Lot of the Father":
+            # [修改] 已去掉 "Lot of " 前缀
+            if lot_name == "the Father":
                 sa_lon = planet_positions.get('Sa', {}).get('lon')
                 su_lon = planet_positions.get('Su', {}).get('lon')
                 if sa_lon is not None and su_lon is not None:
@@ -459,41 +469,53 @@ def get_attributes(
     # =========================================================================
     # 第四步：计算映点（Antiscia）与反映点（Contra-Antiscia）
     #
-    # 映点公式：    antiscia_lon     = (180 - lon) % 360
+    # 映点公式：    antiscia_lon        = (180 - lon) % 360
     # 反映点公式：  contra_antiscia_lon = (360 - lon) % 360
     # 速度取反（映射方向相反）
     #
-    # 覆盖范围：主行星 / 宫头 / 阿拉伯点 / 小行星 / 恒星
+    # [修改] 按类别分别存放：planets / houses / minor_planets / fixed_stars / arabic_parts
     # =========================================================================
-    antiscia        = {}
-    contra_antiscia = {}
+    antiscia = {
+        'planets':       {},
+        'houses':        {},
+        'minor_planets': {},
+        'fixed_stars':   {},
+        'arabic_parts':  {},
+    }
+    contra_antiscia = {
+        'planets':       {},
+        'houses':        {},
+        'minor_planets': {},
+        'fixed_stars':   {},
+        'arabic_parts':  {},
+    }
 
-    def _add_antiscia(name, lon, speed):
-        """内部辅助：计算并写入单个天体的映点与反映点。"""
+    def _add_antiscia(name, lon, speed, category):
+        """内部辅助：计算并写入单个天体的映点与反映点（按类别存放）。"""
         ant_lon    = (180.0 - lon) % 360.0
         contra_lon = (360.0 - lon) % 360.0
-        antiscia[name]        = build_celestial_dict(ant_lon,    0.0, -speed, eps, bounds_system)
-        contra_antiscia[name] = build_celestial_dict(contra_lon, 0.0, -speed, eps, bounds_system)
+        antiscia[category][name]        = build_celestial_dict(ant_lon,    0.0, -speed, eps, bounds_system)
+        contra_antiscia[category][name] = build_celestial_dict(contra_lon, 0.0, -speed, eps, bounds_system)
 
     # A. 主行星（含罗睺、计都）
     for p_name, p_data in planet_positions_new.items():
-        _add_antiscia(p_name, p_data['lon'], p_data['speed'])
+        _add_antiscia(p_name, p_data['lon'], p_data['speed'], 'planets')
 
     # B. 宫头
     for h_name, h_data in house_positions_new.items():
-        _add_antiscia(h_name, h_data['lon'], h_data['speed'])
+        _add_antiscia(h_name, h_data['lon'], h_data['speed'], 'houses')
 
     # C. 阿拉伯点
     for lot_name, lot_data in arabic_parts.items():
-        _add_antiscia(lot_name, lot_data['lon'], lot_data['speed'])
+        _add_antiscia(lot_name, lot_data['lon'], lot_data['speed'], 'arabic_parts')
 
     # D. 小行星
     for mp_name, mp_data in minor_planet_positions_new.items():
-        _add_antiscia(mp_name, mp_data['lon'], mp_data['speed'])
+        _add_antiscia(mp_name, mp_data['lon'], mp_data['speed'], 'minor_planets')
 
     # E. 恒星
     for star_name, star_data in fixed_star_positions_new.items():
-        _add_antiscia(star_name, star_data['lon'], star_data['speed'])
+        _add_antiscia(star_name, star_data['lon'], star_data['speed'], 'fixed_stars')
 
     # =========================================================================
     # 返回全部 7 个字典
@@ -504,6 +526,6 @@ def get_attributes(
         minor_planet_positions_new,  # 小行星（含 bound、face）
         fixed_star_positions_new,    # 恒星  （含 bound、face）
         arabic_parts,                # 阿拉伯点（含 bound、face）
-        antiscia,                    # 映点  （含 bound、face）
-        contra_antiscia,             # 反映点（含 bound、face）
+        antiscia,                    # 映点  （嵌套字典，按类别分组）
+        contra_antiscia,             # 反映点（嵌套字典，按类别分组）
     )
