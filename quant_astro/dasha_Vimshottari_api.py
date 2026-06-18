@@ -1,6 +1,7 @@
 # quant_astro/api.py
 from google.colab import files
 from .dasha_Vimshottari import _calculate_e_seconds, _calculate_dasha_start_time, _generate_dasha_intervals
+from .core import _parse_local_time_and_convert_to_gregorian
 from IPython.display import display, FileLink
 import pandas as pd
 import os
@@ -25,7 +26,14 @@ def create_dasha_table(planet_positions, birth_config, dasa_config):
     except KeyError:
         raise ValueError("输入的 'planet_positions' 字典中缺少 'Mo' (月亮) 的数据。")
     
-    birth_time_str = birth_config["local_time_str"]
+    # 读取历法设置，立即将时间统一转换为格里历（与 core.py 保持一致）
+    calendar = birth_config.get('calendar', 'g')
+    _raw_time = birth_config["local_time_str"]
+    if calendar.lower() == 'j':
+        _greg_dt = _parse_local_time_and_convert_to_gregorian(_raw_time, 'j')
+        birth_time_str = _greg_dt.strftime("%Y-%m-%d %H:%M:%S.%f")
+    else:
+        birth_time_str = _raw_time
     timezone_str = birth_config["timezone_str"]
     days_in_year = dasa_config["days_in_year"]
 

@@ -68,6 +68,41 @@ def _parse_timezone(tz_str):
     mins = float(match.group(4) or 0)
     return sign * (hours + mins/60)
 
+# --- 历法转换辅助函数 ---
+def _parse_local_time_and_convert_to_gregorian(local_time_str, calendar='g'):
+    """
+    解析本地时间字符串，统一转换为格里历 datetime 对象，无精度损失。
+    """
+    try:
+        dt = datetime.strptime(local_time_str, "%Y-%m-%d %H:%M:%S.%f")
+    except ValueError:
+        dt = datetime.strptime(local_time_str, "%Y-%m-%d %H:%M:%S")
+
+    if calendar.lower() == 'g':
+        return dt  # 已是格里历，直接返回
+
+    # 儒略历 -> 格里历：通过 swe 官方函数精确转换
+    hour_dec = (dt.hour
+                + dt.minute / 60.0
+                + dt.second / 3600.0
+                + dt.microsecond / 3600000000.0)
+
+    # 按儒略历日期计算儒略日（JD）
+    jd = swe.julday(dt.year, dt.month, dt.day, hour_dec, swe.JUL_CAL)
+
+    # 将 JD 转回格里历
+    g_year, g_month, g_day, g_h_dec = swe.revjul(jd, swe.GREG_CAL)
+
+    # 将格里历小时小数拆回时、分、秒、微秒
+    g_h  = int(g_h_dec)
+    g_md = (g_h_dec - g_h) * 60.0
+    g_m  = int(g_md)
+    g_sd = (g_md - g_m) * 60.0
+    g_s  = int(g_sd)
+    g_us = round((g_sd - g_s) * 1_000_000)
+
+    return datetime(int(g_year), int(g_month), int(g_day), g_h, g_m, g_s, g_us)
+
 # --- 主计算函数 ---
 def calculate_positions(
     local_time_str, timezone_str, latitude_str, longitude_str, elevation,
@@ -110,16 +145,29 @@ def calculate_positions(
         bundled_ephe_path = pkg_resources.resource_filename('quant_astro', 'ephe')
         swe.set_ephe_path(bundled_ephe_path)
 
-    # 1. 解析输入参数 (这部分逻辑不变)
-    local_dt = datetime.strptime(local_time_str, "%Y-%m-%d %H:%M:%S.%f")
+    # 1. 解析输入参数
+    # 立即按指定历法（'g'=格里历，'j'=儒略历）将时间无损统一转换为格里历
+    calendar = kwargs.get('calendar', 'g')
+    local_dt = _parse_local_time_and_convert_to_gregorian(local_time_str, calendar)
     latitude = _parse_dms(latitude_str)
     longitude = _parse_dms(longitude_str)
     timezone_offset = _parse_timezone(timezone_str)
 
-    # 2. 计算儒略日 (Julian Day) (这部分逻辑不变)
+    # 2. 计算儒略日 (Julian Day)
+    # local_dt 已确保为格里历，显式传入 swe.GREG_CAL，并保留微秒精度
     utc_time = local_dt - timedelta(hours=timezone_offset)
-    jd_utc = swe.julday(utc_time.year, utc_time.month, utc_time.day,
-                       utc_time.hour + utc_time.minute/60 + utc_time.second/3600)
+    jd_utc = swe.julday(
+        utc_time.year, utc_time.month, utc_time.day,
+        utc_time.hour + utc_time.minute / 60.0
+            + utc_time.second / 3600.0
+            + utc_time.microsecond / 3600000000.0,
+        swe.GREG_CAL
+    )
+
+    # [新增] 预先计算真实黄赤交角，供后续所有 swe.cotrans() 使用
+    # swe.ECL_NUT (= -1)：swisseph 内置伪天体，专用于返回章动与黄赤交角
+    _eps_raw, _ = swe.calc_ut(jd_utc, swe.ECL_NUT, 0)
+    eps = _eps_raw[0]  # 真实黄赤交角（度），约 23.4°
 
     # 3. 设置星历计算标志
     if ecliptic_mode == 'sidereal':
@@ -189,7 +237,7 @@ def calculate_positions(
                 south_lon = (xx[0] + 180) % 360
                 south_lat = -xx[1]
                 pos_ecl_south = (south_lon, south_lat, xx[2])
-                pos_eq_south = swe.cotrans(pos_ecl_south, swe.FLG_EQUATORIAL)
+                pos_eq_south = swe.cotrans(pos_ecl_south, eps)
                 planet_positions['Ke'] = {'lon': south_lon, 'lat': south_lat, 'speed': xx[3], 'ra': pos_eq_south[0], 'dec': pos_eq_south[1], 'dec_speed': -xx_eq[4]}
 
 
@@ -277,7 +325,7 @@ def calculate_positions(
             current_speed = houses_speed[i]
 
             pos_ecl = (final_lon, 0.0, 1.0)
-            pos_eq = swe.cotrans(pos_ecl, swe.FLG_EQUATORIAL)
+            pos_eq = swe.cotrans(pos_ecl, eps)
             # 注意：这里的 'lon' 用的是 final_lon
             house_positions[f"house {i+1}"] = {'lon': final_lon, 'lat': 0.0, 'speed': current_speed, 'ra': pos_eq[0], 'dec': pos_eq[1], 'dec_speed': 0.0}
 
@@ -342,10 +390,8 @@ def get_sun_rise_and_lord(birth_config, sunrise_config):
     
     # 3. 确定搜索起始时间
     local_dt_str = birth_config['local_time_str']
-    try:
-        local_dt = datetime.strptime(local_dt_str, "%Y-%m-%d %H:%M:%S.%f")
-    except ValueError:
-        local_dt = datetime.strptime(local_dt_str, "%Y-%m-%d %H:%M:%S")
+    calendar = birth_config.get('calendar', 'g')
+    local_dt = _parse_local_time_and_convert_to_gregorian(local_dt_str, calendar)
 
     # 设为当天 00:00:00，搜索当天的日出
     local_midnight = local_dt.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -515,10 +561,8 @@ def get_planetary_hour(birth_config, sunrise_config):
     tz_offset = _parse_timezone(birth_config['timezone_str'])
     
     local_dt_str = birth_config['local_time_str']
-    try:
-        local_dt = datetime.strptime(local_dt_str, "%Y-%m-%d %H:%M:%S.%f")
-    except ValueError:
-        local_dt = datetime.strptime(local_dt_str, "%Y-%m-%d %H:%M:%S")
+    calendar = birth_config.get('calendar', 'g')
+    local_dt = _parse_local_time_and_convert_to_gregorian(local_dt_str, calendar)
 
     # 2. 定义辅助函数：计算特定日期的日出日落
     def calc_sun_events(target_date):
