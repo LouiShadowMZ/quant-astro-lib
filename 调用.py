@@ -50,6 +50,7 @@
         "    \"elevation\": 0.0, # 海拔（米，两位小数）\n",
         "    \"atpress\": 1013.25, # 大气压\n",
         "    \"attemp\": 20.0, # 气温\n",
+        "    \"calendar\": \"g\",  # g = 格里历，j = 儒略历\n",
         "}\n",
         "\n",
         "calculation_options = {\n",
