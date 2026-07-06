@@ -266,10 +266,6 @@ def calculate_positions(
     }
     
     if house_system in house_codes:
-    
-    if house_system in house_codes:
-    
-    if house_system in house_codes:
         target_asc = None  # <---【新增】初始化变量，防止非卜卦模式下报错
             # --- 在计算宫位前，增加这些代码 ---
         jd_for_houses = jd_utc  # 默认情况下，用原始时间计算宫位
