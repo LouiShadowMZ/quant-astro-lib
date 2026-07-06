@@ -243,7 +243,31 @@ def calculate_positions(
 
     # 5. 计算宫位位置
     house_positions = {}
-    house_codes = {'Placidus': b'P', 'Koch': b'K', 'Regiomontanus': b'R', 'Whole Sign': b'W', 'Equal': b'E', 'Campanus': 'C'}
+    house_codes = {
+        'Placidus': b'P',         # 普拉西度制 (Default)
+        'Koch': b'K',             # 科赫制
+        'Regiomontanus': b'R',    # 雷吉奥蒙塔努斯制 (区域制)
+        'Whole Sign': b'W',       # 整宫制
+        'Equal': b'E',            # 均等宫位制 (以旭日/上升点为准)
+        'Campanus': b'C',         # 坎帕纳斯制
+        'Alcabitius': b'B',       # 阿卡比特制
+        'Porphyry': b'O',         # 波菲里制
+        'Morinus': b'M',          # 莫林纽斯制
+        'Topocentric': b'T',      # 拓扑中心制 (Polich/Page)
+        'Vehlow': b'V',           # 维氏等宫制 (上升点位于第1宫正中间)
+        'Meridian': b'X',         # 子午线制 / 轴向旋转制
+        'Horizon': b'H',          # 地平线制 / 地平坐标系统
+        'Gauquelin': b'G',        # 高奎林圈 (36 盘区模式)
+        'Krusinski': b'U',        # 克鲁辛斯基制
+        'Carter': b'F',           # 卡特极轴制 (Carter Poli-Equatorial)
+        'Equal/MC': b'D',         # 基于天顶(MC)开始划分的等宫制
+        'Equal/Zodiac': b'N',     # 黄道等宫制
+        'APC': b'Y'               # APC 宫位制
+    }
+    
+    if house_system in house_codes:
+    
+    if house_system in house_codes:
     
     if house_system in house_codes:
         target_asc = None  # <---【新增】初始化变量，防止非卜卦模式下报错
@@ -290,7 +314,27 @@ def calculate_positions(
                         jd_low = jd_mid
                 return jd_mid
 
-            house_codes_map = {'Placidus': b'P', 'Koch': b'K', 'Regiomontanus': b'R', 'Whole Sign': b'W', 'Equal': b'E', 'Campanus': 'C'}
+            house_codes_map = {
+                'Placidus': b'P',
+                'Koch': b'K',
+                'Regiomontanus': b'R',
+                'Whole Sign': b'W',
+                'Equal': b'E',
+                'Campanus': b'C',
+                'Alcabitius': b'B',
+                'Porphyry': b'O',
+                'Morinus': b'M',
+                'Topocentric': b'T',
+                'Vehlow': b'V',
+                'Meridian': b'X',
+                'Horizon': b'H',
+                'Gauquelin': b'G',
+                'Krusinski': b'U',
+                'Carter': b'F',
+                'Equal/MC': b'D',
+                'Equal/Zodiac': b'N',
+                'APC': b'Y'
+            }
             house_flag = swe.FLG_SIDEREAL if ecliptic_mode == 'sidereal' else 0
             hs_code_bytes = house_codes_map.get(house_system)
             
