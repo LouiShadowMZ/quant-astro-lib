@@ -38,12 +38,33 @@ def generate_chart_html(planet_pos, house_pos,
                         calculation_options=None,# 接收计算配置 (含 selected_planets)
 
 
-                        output_filename="astro_chart_final.html"):
+                        output_filename=None):
     """
     生成 HTML，纯 UI 渲染。
     已更新：支持详细的 KP 各种表格数据传入
     """
     
+     # ================= [【修改2】动态提取文件名开始] =================
+    if not output_filename:
+        filename_str = None
+        if isinstance(chart_info, dict):
+            # 情况 A: chart_info 是合并字典，里面有 'chart_name' 字典
+            if 'chart_name' in chart_info and isinstance(chart_info['chart_name'], dict):
+                filename_str = chart_info['chart_name'].get('matter_name')
+            # 情况 B: chart_info 直接就是 chart_name 字典 (如 {'matter_name': '28 证券操纵官非'})
+            elif 'matter_name' in chart_info:
+                filename_str = chart_info.get('matter_name')
+            # 情况 C: chart_info['chart_name'] 直接是字符串
+            elif 'chart_name' in chart_info and isinstance(chart_info['chart_name'], str):
+                filename_str = chart_info['chart_name']
+
+        if filename_str:
+            filename_str = str(filename_str).strip()
+            output_filename = filename_str if filename_str.lower().endswith('.html') else f"{filename_str}.html"
+        else:
+            output_filename = "astro_chart_final.html" # 兜底默认文件名
+    # ================= [动态提取文件名结束] =================
+
     # 1. 转换数据为前端格式
     chart_dict = {
         'asc_lon': house_pos['house 1']['lon'],
