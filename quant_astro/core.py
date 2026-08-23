@@ -134,10 +134,7 @@ def calculate_positions(
     如果提供了 ephe_path，则使用它。否则，使用库内置的星历文件。
     """
 
-    # =========================================================================
     # 智能转换岁差模式：支持字符串输入
-    # 兼容 "swe.SIDM_KRISHNAMURTI"、"SIDM_KRISHNAMURTI" 以及带 "SE_" 前缀命名
-    # =========================================================================
     real_ayanamsha_mode = ayanamsha_mode
     
     if isinstance(ayanamsha_mode, str):
@@ -150,7 +147,6 @@ def calculate_positions(
             real_ayanamsha_mode = getattr(swe, clean_name.replace("SIDM_", "SE_SIDM_"))
         else:
             raise ValueError(f"❌ 找不到岁差模式名称: {ayanamsha_mode}。请检查拼写是否与 swisseph 常量一致。")
-    # =========================================================================
 
     # 设置星历路径
     if ephe_path:
@@ -176,8 +172,8 @@ def calculate_positions(
         swe.GREG_CAL
     )
 
-    # 预先计算真实黄赤交角，供后续所有 swe.cotrans() 使用
-    _eps_raw, _ = swe.calc_ut(jd_utc, swe.ECL_NUT, 0)
+    # 预先计算真实黄赤交角，使用 [0] 避免 2/3 参数解包不匹配
+    _eps_raw = swe.calc_ut(jd_utc, swe.ECL_NUT, 0)[0]
     eps = _eps_raw[0]  # 真实黄赤交角（度），约 23.4°
 
     # 3. 设置星历计算标志
@@ -222,8 +218,8 @@ def calculate_positions(
         if not should_calc:
             continue
 
-        xx, _ = swe.calc_ut(jd_utc, p_id, flag)
-        xx_eq, _ = swe.calc_ut(jd_utc, p_id, flag | swe.FLG_EQUATORIAL)
+        xx = swe.calc_ut(jd_utc, p_id, flag)[0]
+        xx_eq = swe.calc_ut(jd_utc, p_id, flag | swe.FLG_EQUATORIAL)[0]
         
         if name != 'Ra' or (selected_planets is None or 'All' in selected_planets or 'Ra' in selected_planets):
             planet_positions[name] = {
@@ -322,9 +318,12 @@ def calculate_positions(
             
             jd_for_houses = find_correct_time(target_asc, jd_utc, latitude, longitude, hs_code_bytes, house_flag)
 
-        houses_raw, ascmc, houses_speed_raw, ascmc_speed = swe.houses_ex2(
+        res_h = swe.houses_ex2(
             jd_for_houses, latitude, longitude, house_codes[house_system], flags=house_flag
         )
+        houses_raw = res_h[0]
+        ascmc = res_h[1]
+        houses_speed_raw = res_h[2]
         
         houses = _extract_12_cusps(houses_raw)
         houses_speed = _extract_12_cusps(houses_speed_raw)
@@ -492,8 +491,8 @@ def calculate_fixed_stars(jd_utc, selected_stars, ecliptic_mode='tropical', ayan
 
     for star_name in selected_stars:
         try:
-            xx, returned_name, ret_flag = swe.fixstar2_ut(star_name, jd_utc, flag)
-            xx_eq, _, _ = swe.fixstar2_ut(star_name, jd_utc, flag | swe.FLG_EQUATORIAL)
+            xx = swe.fixstar2_ut(star_name, jd_utc, flag)[0]
+            xx_eq = swe.fixstar2_ut(star_name, jd_utc, flag | swe.FLG_EQUATORIAL)[0]
 
             fixed_star_positions[star_name] = {
                 'lon':       xx[0] % 360,
