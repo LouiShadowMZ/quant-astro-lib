@@ -6,6 +6,7 @@ import pytz
 import re
 import pandas as pd
 from pathlib import Path
+import warnings
 
 # 优先使用现代 importlib.resources 替代已废弃的 pkg_resources
 try:
@@ -16,6 +17,36 @@ except ImportError:
     import pkg_resources
     def _get_resource_path(sub_path):
         return pkg_resources.resource_filename('quant_astro', sub_path)
+
+# --- 全局星历路径状态管理器 ---
+_ACTIVE_EPHE_PATH = None
+
+def _setup_ephe_path(ephe_path=None):
+    """
+    统一管理 Swiss Ephemeris 星历路径，防止多功能间互相冲掉路径配置。
+    - 若显式传入 ephe_path，则更新全局路径并设置底层 C 库。
+    - 若未传入且全局尚未初始化，则默认加载库内置 ephe 路径。
+    - 若未传入且全局已有有效路径，则保持当前路径，不进行无故覆盖。
+    """
+    global _ACTIVE_EPHE_PATH
+    if ephe_path is not None:
+        clean_path = str(Path(ephe_path).resolve())
+        swe.set_ephe_path(clean_path)
+        _ACTIVE_EPHE_PATH = clean_path
+    elif _ACTIVE_EPHE_PATH is None:
+        try:
+            bundled_ephe_path = _get_resource_path('ephe')
+            swe.set_ephe_path(bundled_ephe_path)
+            _ACTIVE_EPHE_PATH = bundled_ephe_path
+        except Exception:
+            pass
+    return _ACTIVE_EPHE_PATH
+
+def set_custom_ephe_path(ephe_path):
+    """
+    供外部显式全局配置高精度星历文件夹路径的公共接口。
+    """
+    return _setup_ephe_path(ephe_path)
 
 # --- 辅助函数：兼容 pysweph 2.10.3.4+ 宫位元组格式 (13项或12项) ---
 def _extract_12_cusps(raw_cusps):
@@ -124,15 +155,22 @@ def _parse_local_time_and_convert_to_gregorian(local_time_str, calendar='g'):
 
 # --- 主计算函数 ---
 def calculate_positions(
-    local_time_str, timezone_str, latitude_str, longitude_str, elevation,
+    local_time_str, timezone_str, latitude_str, longitude_str, elevation=0.0,
     ecliptic_mode='sidereal', ayanamsha_mode='SIDM_KRISHNAMURTI',
     node_mode='mean', house_system='Placidus', ephe_path=None, 
-    **kwargs
+    strict_ephe=True, **kwargs
 ):
     """
     计算给定时间和地点的行星和宫位位置。
-    如果提供了 ephe_path，则使用它。否则，使用库内置的星历文件。
+    
+    参数:
+        strict_ephe (bool): 
+            若为 True（默认），当请求 Swiss Ephemeris 高精度计算却因缺少 .se1 文件导致
+            底层静默回退为 Moshier 粗算公式时，立即抛出 FileNotFoundError；
+            若为 False，则仅发出警告并继续使用粗算值。
     """
+    # 统一设置星历路径，不覆盖已有有效配置
+    current_ephe_dir = _setup_ephe_path(ephe_path)
 
     # 智能转换岁差模式：支持字符串输入
     real_ayanamsha_mode = ayanamsha_mode
@@ -147,13 +185,6 @@ def calculate_positions(
             real_ayanamsha_mode = getattr(swe, clean_name.replace("SIDM_", "SE_SIDM_"))
         else:
             raise ValueError(f"❌ 找不到岁差模式名称: {ayanamsha_mode}。请检查拼写是否与 swisseph 常量一致。")
-
-    # 设置星历路径
-    if ephe_path:
-        swe.set_ephe_path(ephe_path)
-    else:
-        bundled_ephe_path = _get_resource_path('ephe')
-        swe.set_ephe_path(bundled_ephe_path)
 
     # 1. 解析输入参数
     calendar = kwargs.get('calendar', 'g')
@@ -218,8 +249,29 @@ def calculate_positions(
         if not should_calc:
             continue
 
-        xx = swe.calc_ut(jd_utc, p_id, flag)[0]
-        xx_eq = swe.calc_ut(jd_utc, p_id, flag | swe.FLG_EQUATORIAL)[0]
+        # 执行黄道坐标计算并捕获返回标志
+        calc_res = swe.calc_ut(jd_utc, p_id, flag)
+        xx = calc_res[0]
+        ret_flag = calc_res[1] if len(calc_res) > 1 and isinstance(calc_res[1], int) else None
+
+        # 校验是否发生静默降级（毛病一修复）
+        if (flag & swe.FLG_SWIEPH) and ret_flag is not None:
+            is_moseph = bool(hasattr(swe, 'FLG_MOSEPH') and (ret_flag & swe.FLG_MOSEPH))
+            is_missing_swieph = not bool(ret_flag & swe.FLG_SWIEPH)
+            if is_moseph or is_missing_swieph:
+                err_msg = (
+                    f"❌ 高精度星历缺失：计算 '{name}' (ID: {p_id}) 在 JD {jd_utc:.4f} 处未能加载 "
+                    f"Swiss Ephemeris 高精度数据文件 (.se1)，底层已静默降级为 Moshier 粗算公式。"
+                    f"当前星历搜索路径为: '{current_ephe_dir}'。"
+                )
+                if strict_ephe:
+                    raise FileNotFoundError(err_msg)
+                else:
+                    warnings.warn(err_msg, RuntimeWarning)
+
+        # 执行赤道坐标计算
+        calc_eq_res = swe.calc_ut(jd_utc, p_id, flag | swe.FLG_EQUATORIAL)
+        xx_eq = calc_eq_res[0]
         
         if name != 'Ra' or (selected_planets is None or 'All' in selected_planets or 'Ra' in selected_planets):
             planet_positions[name] = {
@@ -373,16 +425,13 @@ def calculate_positions(
     return main_planet_positions, house_positions, ascmc, jd_utc, dignity_results, minor_planet_positions
 
 # --- 独立计算函数：日出与值日星 ---
-def get_sun_rise_and_lord(birth_config, sunrise_config):
+def get_sun_rise_and_lord(birth_config, sunrise_config, ephe_path=None):
     """
     独立计算日出时间及值日星。
-    适配 pysweph / pyswisseph 的 rise_trans 签名与多种返回值结构。
+    支持传入 ephe_path 或从 birth_config 中读取 ephe_path，不会覆写已有的全局星历配置。
     """
-    try:
-        bundled_ephe_path = _get_resource_path('ephe')
-        swe.set_ephe_path(bundled_ephe_path)
-    except Exception:
-        pass 
+    effective_ephe_path = ephe_path or birth_config.get('ephe_path')
+    _setup_ephe_path(effective_ephe_path)
 
     lat = _parse_dms(birth_config['latitude_str'])
     lon = _parse_dms(birth_config['longitude_str'])
@@ -471,11 +520,16 @@ def get_sun_rise_and_lord(birth_config, sunrise_config):
     }
 
 # --- 独立函数：计算恒星位置 ---
-def calculate_fixed_stars(jd_utc, selected_stars, ecliptic_mode='tropical', ayanamsha_mode='SIDM_KRISHNAMURTI'):
+def calculate_fixed_stars(
+    jd_utc, selected_stars, ecliptic_mode='tropical', 
+    ayanamsha_mode='SIDM_KRISHNAMURTI', ephe_path=None, strict_ephe=True
+):
     """
     计算给定儒略日下，一组恒星的位置。
-    返回格式与 planet_positions 完全一致。
+    支持显式 ephe_path 注入，并校验恒星数据文件缺失时的降级行为。
     """
+    current_ephe_dir = _setup_ephe_path(ephe_path)
+
     if ecliptic_mode == 'sidereal':
         if isinstance(ayanamsha_mode, str):
             clean_name = ayanamsha_mode.replace("swe.", "").strip()
@@ -491,8 +545,28 @@ def calculate_fixed_stars(jd_utc, selected_stars, ecliptic_mode='tropical', ayan
 
     for star_name in selected_stars:
         try:
-            xx = swe.fixstar2_ut(star_name, jd_utc, flag)[0]
-            xx_eq = swe.fixstar2_ut(star_name, jd_utc, flag | swe.FLG_EQUATORIAL)[0]
+            res_star = swe.fixstar2_ut(star_name, jd_utc, flag)
+            xx = res_star[0]
+            ret_flag = res_star[2] if len(res_star) >= 3 and isinstance(res_star[2], int) else (
+                res_star[1] if len(res_star) == 2 and isinstance(res_star[1], int) else None
+            )
+
+            # 校验恒星高精度文件
+            if (flag & swe.FLG_SWIEPH) and ret_flag is not None:
+                is_moseph = bool(hasattr(swe, 'FLG_MOSEPH') and (ret_flag & swe.FLG_MOSEPH))
+                is_missing_swieph = not bool(ret_flag & swe.FLG_SWIEPH)
+                if is_moseph or is_missing_swieph:
+                    err_msg = (
+                        f"❌ 恒星数据缺失：计算恒星 '{star_name}' 时未能加载对应高精度数据文件。"
+                        f"当前星历搜索路径为: '{current_ephe_dir}'。"
+                    )
+                    if strict_ephe:
+                        raise FileNotFoundError(err_msg)
+                    else:
+                        warnings.warn(err_msg, RuntimeWarning)
+
+            res_star_eq = swe.fixstar2_ut(star_name, jd_utc, flag | swe.FLG_EQUATORIAL)
+            xx_eq = res_star_eq[0]
 
             fixed_star_positions[star_name] = {
                 'lon':       xx[0] % 360,
@@ -504,22 +578,22 @@ def calculate_fixed_stars(jd_utc, selected_stars, ecliptic_mode='tropical', ayan
             }
 
         except Exception as e:
+            if strict_ephe and isinstance(e, FileNotFoundError):
+                raise e
             print(f"⚠️ 恒星 '{star_name}' 计算失败，已跳过。原因：{e}")
             continue
 
     return fixed_star_positions
 
 # --- 计算行星时 (Planetary Hour) ---
-def get_planetary_hour(birth_config, sunrise_config):
+def get_planetary_hour(birth_config, sunrise_config, ephe_path=None):
     """
     计算当前时间对应的行星时 (Planetary Hour)。
     逻辑：根据日出日落将白天和黑夜各分12等分，起始星为值日星，按迦勒底序列顺推。
+    支持传入 ephe_path 或从 birth_config 中读取 ephe_path，保持全局星历路径稳定。
     """
-    try:
-        bundled_ephe_path = _get_resource_path('ephe')
-        swe.set_ephe_path(bundled_ephe_path)
-    except Exception:
-        pass 
+    effective_ephe_path = ephe_path or birth_config.get('ephe_path')
+    _setup_ephe_path(effective_ephe_path)
 
     lat = _parse_dms(birth_config['latitude_str'])
     lon = _parse_dms(birth_config['longitude_str'])
