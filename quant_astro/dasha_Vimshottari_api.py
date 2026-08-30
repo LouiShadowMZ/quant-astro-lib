@@ -1,8 +1,6 @@
 # quant_astro/api.py
-from google.colab import files
 from .dasha_Vimshottari import _calculate_e_seconds, _calculate_dasha_start_time, _generate_dasha_intervals
 from .core import _parse_local_time_and_convert_to_gregorian
-from IPython.display import display, FileLink
 import pandas as pd
 import os
 
@@ -56,6 +54,11 @@ def create_dasha_table(planet_positions, birth_config, dasa_config):
     dasha_df.to_csv(output_filename, index=False, encoding='utf-8')
     print(f"📄 CSV文件 '{output_filename}' 已保存到当前工作目录。")
 
-    # 使用 google.colab.files.download 来触发浏览器下载
-    print("\n✨ 正在启动浏览器下载...")
-    files.download(output_filename)
+    # 在 Colab 环境中自动触发浏览器下载；本地环境（如 WinPython/Jupyter）
+    # 没有 google.colab 模块，文件本来就已经保存在本地了，直接提示路径即可
+    try:
+        from google.colab import files
+        print("\n✨ 正在启动浏览器下载...")
+        files.download(output_filename)
+    except ImportError:
+        print(f"✅ 文件已保存至本地: {os.path.abspath(output_filename)}")

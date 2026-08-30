@@ -1,11 +1,10 @@
 # quant_astro/dasha.py
 
 from decimal import Decimal, getcontext
-from datetime import datetime, timedelta
-import pytz
+from datetime import datetime, timedelta, timezone
 import csv
-import pkg_resources
 import pandas as pd
+from .core import _get_resource_path
 
 # --- 内部辅助函数 ---
 
@@ -27,8 +26,8 @@ def _calculate_e_seconds(moon_lon, days_in_year):
     """
     getcontext().prec = 20 # 设置高精度
     
-    # 1. 读取打包在库中的 star.csv 文件
-    star_file_path = pkg_resources.resource_filename('quant_astro', 'data/star.csv')
+    # 1. 读取打包在库中的 star.csv 文件（复用 core.py 的资源路径解析逻辑）
+    star_file_path = _get_resource_path('data/star.csv')
     with open(star_file_path, mode='r', encoding='utf-8') as file:
         reader = csv.DictReader(file)
         star_data = [row for row in reader]
@@ -73,8 +72,12 @@ def _calculate_dasha_start_time(birth_time_str, timezone_str, e_seconds):
     # 1. 解析时间和时区
     initial_time = datetime.strptime(birth_time_str, "%Y-%m-%d %H:%M:%S.%f")
     timezone_offset = _parse_timezone(timezone_str)
-    local_tz = pytz.FixedOffset(int(timezone_offset * 60))
-    initial_utc = local_tz.localize(initial_time).astimezone(pytz.utc)
+    # 固定时差用标准库 datetime.timezone 即可，无需 pytz。
+    # pytz 的 localize/normalize 是为了处理带夏令时规则的具名时区；
+    # 这里只是一个固定偏移，没有夏令时问题，.replace(tzinfo=...) 与
+    # pytz.FixedOffset(...).localize(...) 在数值上完全等价。
+    local_tz = timezone(timedelta(minutes=int(timezone_offset * 60)))
+    initial_utc = initial_time.replace(tzinfo=local_tz).astimezone(timezone.utc)
     
     # 2. 高精度时间减法
     total_seconds_to_subtract = Decimal(str(e_seconds))

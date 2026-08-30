@@ -26,10 +26,9 @@ setup(
     },
     include_package_data=True,
     
-    # 将 pyswisseph 替换为 pysweph
+    # 将 pyswisseph 替换为 pysweph；pytz 已用标准库 zoneinfo/timezone 替代，无需再声明
     install_requires=[
         'pysweph',
-        'pytz',
         'pandas',
         'numpy'
     ],

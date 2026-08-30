@@ -2,7 +2,7 @@
 
 import pandas as pd
 import numpy as np
-import pkg_resources
+from .core import _get_resource_path
 
 def get_kp_lords(planet_dict, house_dict):
     """
@@ -15,8 +15,8 @@ def get_kp_lords(planet_dict, house_dict):
     返回:
         (planet_results, house_results): 两个独立的字典
     """
-    # 使用 pkg_resources 来安全地获取包内数据文件的路径
-    csv_path = pkg_resources.resource_filename('quant_astro', 'data/sub-sub.csv')
+    # 复用 core.py 中已经写好的 importlib.resources 优先、pkg_resources 兜底的解析逻辑
+    csv_path = _get_resource_path('data/sub-sub.csv')
     
     df = pd.read_csv(csv_path)
     df['To'] = np.where(df['To'] == 0, 360.0, df['To'])

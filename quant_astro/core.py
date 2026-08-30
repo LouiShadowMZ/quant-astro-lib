@@ -2,7 +2,6 @@
 
 import swisseph as swe
 from datetime import datetime, timedelta
-import pytz
 import re
 import pandas as pd
 from pathlib import Path
