@@ -1,8 +1,7 @@
 # quant_astro/kp.py
 
-import pandas as pd
 import numpy as np
-from .core import _get_resource_path
+from .core import _load_sub_sub_table
 
 def get_kp_lords(planet_dict, house_dict):
     """
@@ -15,12 +14,10 @@ def get_kp_lords(planet_dict, house_dict):
     返回:
         (planet_results, house_results): 两个独立的字典
     """
-    # 复用 core.py 中已经写好的 importlib.resources 优先、pkg_resources 兜底的解析逻辑
-    csv_path = _get_resource_path('data/sub-sub.csv')
-    
-    df = pd.read_csv(csv_path)
-    df['To'] = np.where(df['To'] == 0, 360.0, df['To'])
-    
+    # 复用 core.py 中的缓存加载器：sub-sub.csv 是静态参考表，不随出生数据变化，
+    # 进程内只需读盘解析一次（此前每次调用本函数都会重新 pd.read_csv 一遍）。
+    df = _load_sub_sub_table()
+
     from_arr = df['From'].values.astype('float64')
     to_arr = df['To'].values.astype('float64')
     records = df.to_dict('records')

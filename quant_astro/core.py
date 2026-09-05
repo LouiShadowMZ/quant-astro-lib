@@ -4,8 +4,10 @@ import swisseph as swe
 from datetime import datetime, timedelta
 import re
 import pandas as pd
+import numpy as np
 from pathlib import Path
 import warnings
+from functools import lru_cache
 
 # 优先使用现代 importlib.resources 替代已废弃的 pkg_resources
 try:
@@ -47,6 +49,50 @@ def set_custom_ephe_path(ephe_path):
     """
     return _setup_ephe_path(ephe_path)
 
+# --- 辅助函数：统一解析岁差(ayanamsha)模式名称 ---
+def _resolve_ayanamsha_mode(ayanamsha_mode):
+    """
+    将岁差模式解析为 swisseph 可用的整数常量。
+
+    支持：
+      - 直接传入 swe 整数常量（如 swe.SIDM_LAHIRI），原样返回；
+      - 传入字符串，如 'SIDM_KRISHNAMURTI' / 'swe.SIDM_KRISHNAMURTI' / 'KRISHNAMURTI'，
+        依次尝试 swe.<name> / swe.SE_<name> / swe.SE_SIDM_<name 去掉 SIDM_ 前缀后> 三种命名，
+        兼容不同版本 swisseph/pysweph 的常量命名差异。
+
+    统一提取该函数是为了让 calculate_positions 与 calculate_fixed_stars 共用同一套解析逻辑
+    ——此前两处各写一份，calculate_fixed_stars 的版本少了第三种回退命名，且解析失败时
+    不会报错，而是直接跳过 swe.set_sid_mode()，导致恒星计算静默沿用上一次全局设置的
+    岁差（甚至是 swisseph 未设置时的默认 Fagan-Bradley），而非调用者传入的岁差。
+    """
+    if not isinstance(ayanamsha_mode, str):
+        return ayanamsha_mode
+
+    clean_name = ayanamsha_mode.replace("swe.", "").strip()
+    if hasattr(swe, clean_name):
+        return getattr(swe, clean_name)
+    if hasattr(swe, f"SE_{clean_name}"):
+        return getattr(swe, f"SE_{clean_name}")
+    if hasattr(swe, clean_name.replace("SIDM_", "SE_SIDM_")):
+        return getattr(swe, clean_name.replace("SIDM_", "SE_SIDM_"))
+    raise ValueError(f"❌ 找不到岁差模式名称: {ayanamsha_mode}。请检查拼写是否与 swisseph 常量一致。")
+
+# --- 辅助函数：缓存加载 KP 副星主查找表 (data/sub-sub.csv) ---
+@lru_cache(maxsize=1)
+def _load_sub_sub_table():
+    """
+    该表（度数区间 -> 星座/星宿/各级星主）是与具体出生数据无关的静态参考数据，
+    进程生命周期内内容不会改变，只需从磁盘读取、解析一次即可。
+
+    kp.py 的 get_kp_lords() 与本模块 calculate_positions() 中的 KP 卜卦(KP_HORARY)
+    查找共用此缓存，避免同一份 CSV 在同一次出生盘计算中被重复读盘、重复交给
+    pandas 解析（此前两处各自独立调用 pd.read_csv，且每算一张盘就重新解析一次）。
+    """
+    csv_path = _get_resource_path('data/sub-sub.csv')
+    df = pd.read_csv(csv_path)
+    df['To'] = np.where(df['To'] == 0, 360.0, df['To'])
+    return df
+
 # --- 辅助函数：兼容 pysweph 2.10.3.4+ 宫位元组格式 (13项或12项) ---
 def _extract_12_cusps(raw_cusps):
     """
@@ -67,6 +113,43 @@ MINOR_PLANET_CATALOG = {
     'Pa': swe.PALLAS,   # 2 智神星
     'Jn': swe.JUNO,     # 3 婚神星
     'Vs': swe.VESTA,    # 4 灶神星
+}
+
+# --- 宫位制代码表：字符串名称 -> swisseph hsys 单字节代码 ---
+# 提升为模块级常量（原先在 calculate_positions 内部每次调用都重建一次该 dict）。
+# 已核对 pysweph 文档列出的全部 24 种宫位制，补全此前遗漏的 5 种：
+# 'I'/'i'（两种 Sunshine 解法）、'L'（Pullen SD）、'Q'（Pullen SR）、'S'（Sripati）。
+# 注意：'A' 与 'E' 在 Swiss Ephemeris 中是同一个"整宫位以上升点起算"系统的两个别名，
+# 而非两套不同宫位制，故此表沿用原实现只保留 'E' 一项，不算遗漏。
+# 另外提醒：Gauquelin（'G'）返回的是 36 个 sector 而非 12 宫，
+# 下方 calculate_positions 中按 12 宫结构解析的逻辑并不适用于它；
+# 这是数据结构层面的既有限制，不在本次"补全宫位制/岁差调用"范围内，如需使用
+# Gauquelin sector 建议单独处理其 37 项（含空索引 0）原始返回值。
+house_codes = {
+    'Placidus': b'P',
+    'Koch': b'K',
+    'Regiomontanus': b'R',
+    'Whole Sign': b'W',
+    'Equal': b'E',
+    'Campanus': b'C',
+    'Alcabitius': b'B',
+    'Porphyry': b'O',
+    'Morinus': b'M',
+    'Topocentric': b'T',
+    'Vehlow': b'V',
+    'Meridian': b'X',
+    'Horizon': b'H',
+    'Gauquelin': b'G',
+    'Krusinski': b'U',
+    'Carter': b'F',
+    'Equal/MC': b'D',
+    'Equal/Zodiac': b'N',
+    'APC': b'Y',
+    'Sunshine': b'I',                  # Sunshine (Makransky, solution Treindl)
+    'Sunshine (Makransky)': b'i',      # Sunshine (Makransky, solution Makransky) —— 大小写敏感，与上一项是两套不同系统
+    'Pullen SD': b'L',                 # Pullen SD (sinusoidal delta)
+    'Pullen SR': b'Q',                 # Pullen SR (sinusoidal ratio)
+    'Sripati': b'S',
 }
 
 # --- 占星基础数据：庙旺陷落表 ---
@@ -171,19 +254,8 @@ def calculate_positions(
     # 统一设置星历路径，不覆盖已有有效配置
     current_ephe_dir = _setup_ephe_path(ephe_path)
 
-    # 智能转换岁差模式：支持字符串输入
-    real_ayanamsha_mode = ayanamsha_mode
-    
-    if isinstance(ayanamsha_mode, str):
-        clean_name = ayanamsha_mode.replace("swe.", "").strip()
-        if hasattr(swe, clean_name):
-            real_ayanamsha_mode = getattr(swe, clean_name)
-        elif hasattr(swe, f"SE_{clean_name}"):
-            real_ayanamsha_mode = getattr(swe, f"SE_{clean_name}")
-        elif hasattr(swe, clean_name.replace("SIDM_", "SE_SIDM_")):
-            real_ayanamsha_mode = getattr(swe, clean_name.replace("SIDM_", "SE_SIDM_"))
-        else:
-            raise ValueError(f"❌ 找不到岁差模式名称: {ayanamsha_mode}。请检查拼写是否与 swisseph 常量一致。")
+    # 智能转换岁差模式：支持字符串输入（解析逻辑与 calculate_fixed_stars 共用，见 _resolve_ayanamsha_mode）
+    real_ayanamsha_mode = _resolve_ayanamsha_mode(ayanamsha_mode)
 
     # 1. 解析输入参数
     calendar = kwargs.get('calendar', 'g')
@@ -299,28 +371,8 @@ def calculate_positions(
 
     # 5. 计算宫位位置
     house_positions = {}
-    house_codes = {
-        'Placidus': b'P',
-        'Koch': b'K',
-        'Regiomontanus': b'R',
-        'Whole Sign': b'W',
-        'Equal': b'E',
-        'Campanus': b'C',
-        'Alcabitius': b'B',
-        'Porphyry': b'O',
-        'Morinus': b'M',
-        'Topocentric': b'T',
-        'Vehlow': b'V',
-        'Meridian': b'X',
-        'Horizon': b'H',
-        'Gauquelin': b'G',
-        'Krusinski': b'U',
-        'Carter': b'F',
-        'Equal/MC': b'D',
-        'Equal/Zodiac': b'N',
-        'APC': b'Y'
-    }
-    
+    # house_codes 现为模块级常量，见文件顶部定义（已覆盖 pysweph 全部 24 种宫位制）
+
     if house_system in house_codes:
         target_asc = None
         jd_for_houses = jd_utc
@@ -335,9 +387,8 @@ def calculate_positions(
             if not horary_mode or horary_number is None:
                 raise ValueError("卜卦字典中缺少 'mode' 或 'number' 参数。")
 
-            csv_path = _get_resource_path('data/sub-sub.csv')
-            df = pd.read_csv(csv_path)
-            
+            df = _load_sub_sub_table()
+
             if horary_mode.upper() == "KS-N":
                 COLUMN, RESULT_COLUMN = "KS-N", "KS-D"
             else:
@@ -530,12 +581,7 @@ def calculate_fixed_stars(
     current_ephe_dir = _setup_ephe_path(ephe_path)
 
     if ecliptic_mode == 'sidereal':
-        if isinstance(ayanamsha_mode, str):
-            clean_name = ayanamsha_mode.replace("swe.", "").strip()
-            if hasattr(swe, clean_name):
-                swe.set_sid_mode(getattr(swe, clean_name))
-            elif hasattr(swe, f"SE_{clean_name}"):
-                swe.set_sid_mode(getattr(swe, f"SE_{clean_name}"))
+        swe.set_sid_mode(_resolve_ayanamsha_mode(ayanamsha_mode))
         flag = swe.FLG_SIDEREAL | swe.FLG_SWIEPH | swe.FLG_SPEED
     else:
         flag = swe.FLG_SWIEPH | swe.FLG_SPEED

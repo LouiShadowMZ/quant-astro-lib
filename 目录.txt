@@ -1,0 +1,61 @@
+D:\github\my_astro_project>tree /f
+卷 Data 的文件夹 PATH 列表
+卷序列号为 623A-CD6D
+D:.
+│  kp-csv生成.ipynb
+│  LIST.TXT
+│  README.md
+│  setup.py
+│  调用.ipynb
+│
+├─html
+│      astro_style.css
+│      astro_style_config.js
+│
+├─quant_astro
+│  │  aspects.py
+│  │  attributes.py
+│  │  chart.py
+│  │  core.py
+│  │  dasha_Vimshottari.py
+│  │  dasha_Vimshottari_api.py
+│  │  kp.py
+│  │  points.py
+│  │  __init__.py
+│  │
+│  ├─data
+│  │      star.csv
+│  │      sub-sub.csv
+│  │      sub-sub原版.csv
+│  │
+│  ├─ephe
+│  │      seas_00.se1
+│  │      seas_06.se1
+│  │      seas_12.se1
+│  │      seas_18.se1
+│  │      sefstars.txt
+│  │      semo_18.se1
+│  │      sepl_18.se1
+│  │
+│  └─__pycache__
+│          aspects.cpython-313.pyc
+│          attributes.cpython-313.pyc
+│          chart.cpython-313.pyc
+│          core.cpython-313.pyc
+│          dasha_Vimshottari.cpython-313.pyc
+│          dasha_Vimshottari_api.cpython-313.pyc
+│          kp.cpython-313.pyc
+│          points.cpython-313.pyc
+│          __init__.cpython-313.pyc
+│
+└─quant_astro.egg-info
+        dependency_links.txt
+        PKG-INFO
+        requires.txt
+        SOURCES.txt
+        top_level.txt
+
+
+D:\winpython\WPy64-313150
+
+
