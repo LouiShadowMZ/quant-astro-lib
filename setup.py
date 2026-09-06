@@ -11,7 +11,7 @@ if os.path.exists('README.md'):
 
 setup(
     name='quant-astro',
-    version='0.1.5',  # 迁移至 pysweph，更新版本号
+    version='0.1.8',  # 与 quant_astro/__init__.py 的 __version__ 保持一致
     author='Lucius',
     author_email='kristenrobi85@gmail.com',
     description='一个用于量化占星研究的Python库。',

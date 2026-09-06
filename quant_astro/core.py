@@ -194,11 +194,27 @@ def _parse_dms(dms_str):
     return absolute_deg
 
 def _parse_timezone(tz_str):
-    match = re.match(r'^([+-]?)(\d{1,2})(:?)(\d{0,2})$', tz_str)
+    r"""
+    解析时区偏移字符串，支持三种格式：纯小时('+8')、时:分('-5:30')、小数小时('+5.5')。
+
+    原正则 r'^([+-]?)(\d{1,2})(:?)(\d{0,2})$' 无法匹配小数点：遇到调用.ipynb 注释里
+    明确写着支持的 '+5.5' 这类格式时，re.match 返回 None，下一行 match.group(1)
+    会直接抛出 AttributeError，而不是一个说明原因的错误。
+    """
+    tz_str = tz_str.strip()
+    match = re.match(r'^([+-]?)(\d{1,2})(?::(\d{1,2})|\.(\d+))?$', tz_str)
+    if not match:
+        raise ValueError(f"❌ 无法解析时区字符串: '{tz_str}'。支持的格式如: '+8'、'-5:30'、'+5.5'。")
+
     sign = -1 if match.group(1) == '-' else 1
     hours = float(match.group(2))
-    mins = float(match.group(4) or 0)
-    return sign * (hours + mins/60)
+
+    if match.group(3) is not None:          # 'HH:MM' 格式
+        hours += float(match.group(3)) / 60
+    elif match.group(4) is not None:        # 'HH.分数' 小数小时格式
+        hours = float(f"{match.group(2)}.{match.group(4)}")
+
+    return sign * hours
 
 # --- 历法转换辅助函数 ---
 def _parse_local_time_and_convert_to_gregorian(local_time_str, calendar='g'):
@@ -359,7 +375,9 @@ def calculate_positions(
                 south_lon = (xx[0] + 180) % 360
                 south_lat = -xx[1]
                 pos_ecl_south = (south_lon, south_lat, xx[2])
-                pos_eq_south = swe.cotrans(pos_ecl_south, eps)
+                # swe.cotrans: 黄道->赤道时 eps 需取负值（pysweph 文档："From ecliptical
+                # to equatorial, obliquity must be negative"），此前误传了 +eps。
+                pos_eq_south = swe.cotrans(pos_ecl_south, -eps)
                 planet_positions['Ke'] = {
                     'lon': south_lon,
                     'lat': south_lat,
@@ -442,7 +460,8 @@ def calculate_positions(
             current_speed = houses_speed[i]
 
             pos_ecl = (final_lon, 0.0, 1.0)
-            pos_eq = swe.cotrans(pos_ecl, eps)
+            # 同上：黄道->赤道换算，eps 需取负值
+            pos_eq = swe.cotrans(pos_ecl, -eps)
             house_positions[f"house {i+1}"] = {
                 'lon': final_lon,
                 'lat': 0.0,
@@ -518,23 +537,16 @@ def get_sun_rise_and_lord(birth_config, sunrise_config, ephe_path=None):
         )
         
         rise_jd = 0.0
-        ret_flag = -1
-        
-        if isinstance(res, tuple):
-            if isinstance(res[0], int) and len(res) > 1 and isinstance(res[1], (tuple, list)):
-                ret_flag = res[0]
-                rise_jd = res[1][0]
-            elif isinstance(res[0], (tuple, list)) and len(res) > 1 and isinstance(res[1], int):
-                ret_flag = res[1]
-                rise_jd = res[0][0]
-            elif isinstance(res[0], float):
-                ret_flag = 0
-                rise_jd = res[0]
+        # rise_trans 固定返回 (int res, (tret)) 二元组，res[1][0] 即事件儒略日；
+        # 迁移指南未将 rise_trans 列入返回值有变的函数，故无需像 calc_ut/houses
+        # 那样做形状猜测。
+        ret_flag, tret = res
+        rise_jd = tret[0]
         
         if ret_flag < 0 or rise_jd <= 1.0:
             return {'error': f"Sunrise not found. Flag={ret_flag}, JD={rise_jd}. (Polar region?)"}
             
-    except (swe.Error, Exception) as e:
+    except Exception as e:
         return {'error': f"SwissEph Error: {e}"}
 
     try:
@@ -591,10 +603,11 @@ def calculate_fixed_stars(
     for star_name in selected_stars:
         try:
             res_star = swe.fixstar2_ut(star_name, jd_utc, flag)
+            # fixstar2_ut 固定返回 (xx, stnam, retflags) 三元组，pysweph 迁移指南
+            # 里列出的 breaking change 只涉及 calc/calc_ut/houses 系列，不含 fixstar，
+            # 故此处无需像 calc_ut 那样做 2/3 元组兼容。
             xx = res_star[0]
-            ret_flag = res_star[2] if len(res_star) >= 3 and isinstance(res_star[2], int) else (
-                res_star[1] if len(res_star) == 2 and isinstance(res_star[1], int) else None
-            )
+            ret_flag = res_star[2]
 
             # 校验恒星高精度文件
             if (flag & swe.FLG_SWIEPH) and ret_flag is not None:
@@ -667,11 +680,12 @@ def get_planetary_hour(birth_config, sunrise_config, ephe_path=None):
         flag_rise = swe.CALC_RISE | style_flags
         flag_set = swe.CALC_SET | style_flags
 
+        # rise_trans 固定返回 (int, (tret)) 二元组，见 get_sun_rise_and_lord 中说明
         res_rise = swe.rise_trans(jd_start, swe.SUN, flag_rise, geopos, press, temp, swe.FLG_SWIEPH)
-        rise_jd = res_rise[1][0] if isinstance(res_rise[1], (tuple, list)) else res_rise[0][0] 
+        rise_jd = res_rise[1][0]
         
         res_set = swe.rise_trans(jd_start, swe.SUN, flag_set, geopos, press, temp, swe.FLG_SWIEPH)
-        set_jd = res_set[1][0] if isinstance(res_set[1], (tuple, list)) else res_set[0][0]
+        set_jd = res_set[1][0]
 
         def jd_to_local(jd_val):
             y, m, d, h_dec = swe.revjul(jd_val)
