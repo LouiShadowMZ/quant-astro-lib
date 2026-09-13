@@ -1,754 +1,853 @@
-# quant_astro/core.py
+"""可按依赖局部重算的占星底座。
+
+本模块只负责输入解析、Swiss Ephemeris 坐标/宫位计算，以及依赖时间的
+日出日落、值日星和行星时。KP 查表与象意逻辑位于 :mod:`kp`。
+"""
+
+from __future__ import annotations
+
+import re
+import threading
+import warnings
+from dataclasses import asdict, dataclass
+from datetime import date, datetime, time, timedelta, timezone
+from functools import lru_cache
+from importlib.resources import files
+from pathlib import Path
+from typing import Any, Iterable, Mapping, Sequence
 
 import swisseph as swe
-from datetime import datetime, timedelta
-import re
-import pandas as pd
-import numpy as np
-from pathlib import Path
-import warnings
-from functools import lru_cache
 
-# 优先使用现代 importlib.resources 替代已废弃的 pkg_resources
-try:
-    from importlib.resources import files
-    def _get_resource_path(sub_path):
-        return str(files('quant_astro').joinpath(sub_path))
-except ImportError:
-    import pkg_resources
-    def _get_resource_path(sub_path):
-        return pkg_resources.resource_filename('quant_astro', sub_path)
 
-# --- 全局星历路径状态管理器 ---
-_ACTIVE_EPHE_PATH = None
+_SWISS_LOCK = threading.RLock()
+_ACTIVE_EPHE_PATH: str | None = None
 
-def _setup_ephe_path(ephe_path=None):
+MAIN_PLANETS: dict[str, int] = {
+    "Su": swe.SUN,
+    "Mo": swe.MOON,
+    "Me": swe.MERCURY,
+    "Ve": swe.VENUS,
+    "Ma": swe.MARS,
+    "Ju": swe.JUPITER,
+    "Sa": swe.SATURN,
+    "Ur": swe.URANUS,
+    "Ne": swe.NEPTUNE,
+    "Pl": swe.PLUTO,
+}
+
+MINOR_PLANETS: dict[str, int] = {
+    "Ch": swe.CHIRON,
+    "Ph": swe.PHOLUS,
+    "Ce": swe.CERES,
+    "Pa": swe.PALLAS,
+    "Jn": swe.JUNO,
+    "Vs": swe.VESTA,
+}
+
+HOUSE_SYSTEMS: dict[str, bytes] = {
+    "Placidus": b"P",
+    "Koch": b"K",
+    "Regiomontanus": b"R",
+    "Whole Sign": b"W",
+    "Equal": b"E",
+    "Campanus": b"C",
+    "Alcabitius": b"B",
+    "Porphyry": b"O",
+    "Morinus": b"M",
+    "Topocentric": b"T",
+    "Vehlow": b"V",
+    "Meridian": b"X",
+    "Horizon": b"H",
+    "Krusinski": b"U",
+    "Carter": b"F",
+    "Equal/MC": b"D",
+    "Equal/Zodiac": b"N",
+    "APC": b"Y",
+    "Sunshine": b"I",
+    "Sunshine (Makransky)": b"i",
+    "Pullen SD": b"L",
+    "Pullen SR": b"Q",
+    "Sripati": b"S",
+}
+
+# datetime.weekday(): Monday == 0
+WEEKDAY_LORDS: dict[int, str] = {
+    0: "Mo",
+    1: "Ma",
+    2: "Me",
+    3: "Ju",
+    4: "Ve",
+    5: "Sa",
+    6: "Su",
+}
+CHALDEAN_ORDER: tuple[str, ...] = ("Sa", "Ju", "Ma", "Su", "Ve", "Me", "Mo")
+
+
+@dataclass(frozen=True)
+class AstroContext:
+    """一次计算共享的时间与地理底座。
+
+    ``local_dt`` 与 ``utc_dt`` 都是带时区的 datetime；``tz_offset`` 为小时数。
+    本地 Web 层需要 JSON 时可使用 :meth:`to_dict`。
     """
-    统一管理 Swiss Ephemeris 星历路径，防止多功能间互相冲掉路径配置。
-    - 若显式传入 ephe_path，则更新全局路径并设置底层 C 库。
-    - 若未传入且全局尚未初始化，则默认加载库内置 ephe 路径。
-    - 若未传入且全局已有有效路径，则保持当前路径，不进行无故覆盖。
-    """
+
+    jd_utc: float
+    lat: float
+    lon: float
+    eps: float
+    local_dt: datetime
+    utc_dt: datetime
+    tz_offset: float
+    elevation: float = 0.0
+    atpress: float = 1013.25
+    attemp: float = 10.0
+    calendar: str = "g"
+    ephe_path: str | None = None
+
+    def to_dict(self, *, json_safe: bool = True) -> dict[str, Any]:
+        result = asdict(self)
+        if json_safe:
+            result["local_dt"] = self.local_dt.isoformat()
+            result["utc_dt"] = self.utc_dt.isoformat()
+        return result
+
+
+def set_ephemeris_path(ephe_path: str | Path | None = None) -> str | None:
+    """设置并记住星历目录；未传路径时仅进行一次内置目录初始化。"""
     global _ACTIVE_EPHE_PATH
-    if ephe_path is not None:
-        clean_path = str(Path(ephe_path).resolve())
-        swe.set_ephe_path(clean_path)
-        _ACTIVE_EPHE_PATH = clean_path
-    elif _ACTIVE_EPHE_PATH is None:
-        try:
-            bundled_ephe_path = _get_resource_path('ephe')
-            swe.set_ephe_path(bundled_ephe_path)
-            _ACTIVE_EPHE_PATH = bundled_ephe_path
-        except Exception:
-            pass
+    with _SWISS_LOCK:
+        if ephe_path is not None:
+            if str(ephe_path) == "":
+                swe.set_ephe_path("")
+                _ACTIVE_EPHE_PATH = ""
+            else:
+                resolved = str(Path(ephe_path).expanduser().resolve())
+                swe.set_ephe_path(resolved)
+                _ACTIVE_EPHE_PATH = resolved
+        elif _ACTIVE_EPHE_PATH is None:
+            try:
+                package_name = (__package__ or "quant_astro").split(".")[0]
+                bundled = str(files(package_name).joinpath("ephe"))
+                if Path(bundled).is_dir():
+                    swe.set_ephe_path(bundled)
+                    _ACTIVE_EPHE_PATH = bundled
+            except (ModuleNotFoundError, FileNotFoundError, TypeError):
+                pass
+            if _ACTIVE_EPHE_PATH is None:
+                # 显式记录并恢复“无数据目录”状态，防止旧上下文意外沿用后来设置的路径。
+                swe.set_ephe_path("")
+                _ACTIVE_EPHE_PATH = ""
     return _ACTIVE_EPHE_PATH
 
-def set_custom_ephe_path(ephe_path):
-    """
-    供外部显式全局配置高精度星历文件夹路径的公共接口。
-    """
-    return _setup_ephe_path(ephe_path)
 
-# --- 辅助函数：统一解析岁差(ayanamsha)模式名称 ---
-def _resolve_ayanamsha_mode(ayanamsha_mode):
-    """
-    将岁差模式解析为 swisseph 可用的整数常量。
-
-    支持：
-      - 直接传入 swe 整数常量（如 swe.SIDM_LAHIRI），原样返回；
-      - 传入字符串，如 'SIDM_KRISHNAMURTI' / 'swe.SIDM_KRISHNAMURTI' / 'KRISHNAMURTI'，
-        依次尝试 swe.<name> / swe.SE_<name> / swe.SE_SIDM_<name 去掉 SIDM_ 前缀后> 三种命名，
-        兼容不同版本 swisseph/pysweph 的常量命名差异。
-
-    统一提取该函数是为了让 calculate_positions 与 calculate_fixed_stars 共用同一套解析逻辑
-    ——此前两处各写一份，calculate_fixed_stars 的版本少了第三种回退命名，且解析失败时
-    不会报错，而是直接跳过 swe.set_sid_mode()，导致恒星计算静默沿用上一次全局设置的
-    岁差（甚至是 swisseph 未设置时的默认 Fagan-Bradley），而非调用者传入的岁差。
-    """
-    if not isinstance(ayanamsha_mode, str):
-        return ayanamsha_mode
-
-    clean_name = ayanamsha_mode.replace("swe.", "").strip()
-    if hasattr(swe, clean_name):
-        return getattr(swe, clean_name)
-    if hasattr(swe, f"SE_{clean_name}"):
-        return getattr(swe, f"SE_{clean_name}")
-    if hasattr(swe, clean_name.replace("SIDM_", "SE_SIDM_")):
-        return getattr(swe, clean_name.replace("SIDM_", "SE_SIDM_"))
-    raise ValueError(f"❌ 找不到岁差模式名称: {ayanamsha_mode}。请检查拼写是否与 swisseph 常量一致。")
-
-# --- 辅助函数：缓存加载 KP 副星主查找表 (data/sub-sub.csv) ---
-@lru_cache(maxsize=1)
-def _load_sub_sub_table():
-    """
-    该表（度数区间 -> 星座/星宿/各级星主）是与具体出生数据无关的静态参考数据，
-    进程生命周期内内容不会改变，只需从磁盘读取、解析一次即可。
-
-    kp.py 的 get_kp_lords() 与本模块 calculate_positions() 中的 KP 卜卦(KP_HORARY)
-    查找共用此缓存，避免同一份 CSV 在同一次出生盘计算中被重复读盘、重复交给
-    pandas 解析（此前两处各自独立调用 pd.read_csv，且每算一张盘就重新解析一次）。
-    """
-    csv_path = _get_resource_path('data/sub-sub.csv')
-    df = pd.read_csv(csv_path)
-    df['To'] = np.where(df['To'] == 0, 360.0, df['To'])
-    return df
-
-# --- 辅助函数：兼容 pysweph 2.10.3.4+ 宫位元组格式 (13项或12项) ---
-def _extract_12_cusps(raw_cusps):
-    """
-    pysweph >= 2.10.3.4 返回 13 项元组（索引 0 为空/0，索引 1..12 对应第 1..12 宫）。
-    旧版本 pyswisseph 返回 12 项元组（索引 0..11 对应第 1..12 宫）。
-    统一提取为长度为 12 的列表。
-    """
-    if len(raw_cusps) >= 13:
-        return list(raw_cusps[1:13])
-    return list(raw_cusps[:12])
-
-# --- 小行星目录：代码简写 -> swisseph 内置常量 ---
-# 这6个是 swisseph 标准发行版内置的，不需要额外星历文件
-MINOR_PLANET_CATALOG = {
-    'Ch': swe.CHIRON,   # 2060 凯龙星
-    'Ph': swe.PHOLUS,   # 5145 福禄斯
-    'Ce': swe.CERES,    # 1 谷神星
-    'Pa': swe.PALLAS,   # 2 智神星
-    'Jn': swe.JUNO,     # 3 婚神星
-    'Vs': swe.VESTA,    # 4 灶神星
-}
-
-# --- 宫位制代码表：字符串名称 -> swisseph hsys 单字节代码 ---
-# 提升为模块级常量（原先在 calculate_positions 内部每次调用都重建一次该 dict）。
-# 已核对 pysweph 文档列出的全部 24 种宫位制，补全此前遗漏的 5 种：
-# 'I'/'i'（两种 Sunshine 解法）、'L'（Pullen SD）、'Q'（Pullen SR）、'S'（Sripati）。
-# 注意：'A' 与 'E' 在 Swiss Ephemeris 中是同一个"整宫位以上升点起算"系统的两个别名，
-# 而非两套不同宫位制，故此表沿用原实现只保留 'E' 一项，不算遗漏。
-# 另外提醒：Gauquelin（'G'）返回的是 36 个 sector 而非 12 宫，
-# 下方 calculate_positions 中按 12 宫结构解析的逻辑并不适用于它；
-# 这是数据结构层面的既有限制，不在本次"补全宫位制/岁差调用"范围内，如需使用
-# Gauquelin sector 建议单独处理其 37 项（含空索引 0）原始返回值。
-house_codes = {
-    'Placidus': b'P',
-    'Koch': b'K',
-    'Regiomontanus': b'R',
-    'Whole Sign': b'W',
-    'Equal': b'E',
-    'Campanus': b'C',
-    'Alcabitius': b'B',
-    'Porphyry': b'O',
-    'Morinus': b'M',
-    'Topocentric': b'T',
-    'Vehlow': b'V',
-    'Meridian': b'X',
-    'Horizon': b'H',
-    'Gauquelin': b'G',
-    'Krusinski': b'U',
-    'Carter': b'F',
-    'Equal/MC': b'D',
-    'Equal/Zodiac': b'N',
-    'APC': b'Y',
-    'Sunshine': b'I',                  # Sunshine (Makransky, solution Treindl)
-    'Sunshine (Makransky)': b'i',      # Sunshine (Makransky, solution Makransky) —— 大小写敏感，与上一项是两套不同系统
-    'Pullen SD': b'L',                 # Pullen SD (sinusoidal delta)
-    'Pullen SR': b'Q',                 # Pullen SR (sinusoidal ratio)
-    'Sripati': b'S',
-}
-
-# --- 占星基础数据：庙旺陷落表 ---
-PLANET_DIGNITIES = {
-    'Su': {'Dom': ['Leo'], 'Exalt': ['Ari'], 'Det': ['Aqr'], 'Fall': ['Lib']},
-    'Mo': {'Dom': ['Cnc'], 'Exalt': ['Tau'], 'Det': ['Cap'], 'Fall': ['Sco']},
-    'Me': {'Dom': ['Gem', 'Vir'], 'Exalt': ['Vir'], 'Det': ['Sag', 'Pis'], 'Fall': ['Pis']},
-    'Ve': {'Dom': ['Tau', 'Lib'], 'Exalt': ['Pis'], 'Det': ['Sco', 'Ari'], 'Fall': ['Vir']},
-    'Ma': {'Dom': ['Ari', 'Sco'], 'Exalt': ['Cap'], 'Det': ['Lib', 'Tau'], 'Fall': ['Cnc']},
-    'Ju': {'Dom': ['Sag', 'Pis'], 'Exalt': ['Cnc'], 'Det': ['Gem', 'Vir'], 'Fall': ['Cap']},
-    'Sa': {'Dom': ['Cap', 'Aqr'], 'Exalt': ['Lib'], 'Det': ['Cnc', 'Leo'], 'Fall': ['Ari']},
-    'Ur': {'Dom': ['Aqr'], 'Exalt': ['Sco'], 'Det': ['Leo'], 'Fall': ['Tau']},
-    'Ne': {'Dom': ['Pis'], 'Exalt': ['Cnc'], 'Det': ['Vir'], 'Fall': ['Cap']},
-    'Pl': {'Dom': ['Sco'], 'Exalt': ['Ari'], 'Det': ['Tau'], 'Fall': ['Lib']},
-}
-
-# --- 工具函数 ---
-def decimal_to_dms(deg_float):
-    """
-    将十进制度数转换为结构化字典和字符串。
-    供 chart.py 或其他模块做无计算的格式化展示使用。
-    """
-    d = int(deg_float)
-    m_full = (deg_float - d) * 60
-    m = int(m_full)
-    s = round((m_full - m) * 60, 2)
+def decimal_to_dms(value: float) -> dict[str, float | int | str]:
+    """将十进制度数转为结构化 DMS；负号保留在度数与字符串中。"""
+    sign = -1 if value < 0 else 1
+    absolute = abs(float(value))
+    total_centiseconds = round(absolute * 3600.0 * 100.0)
+    degrees, remainder = divmod(total_centiseconds, 3600 * 100)
+    minutes, centiseconds = divmod(remainder, 60 * 100)
+    seconds = centiseconds / 100.0
+    signed_degrees = degrees * sign
+    prefix = "-" if sign < 0 else ""
     return {
-        'd': d, 'm': m, 's': s,
-        'str': f"{d}°{m:02d}'{s:05.2f}\""
+        "d": signed_degrees,
+        "m": minutes,
+        "s": seconds,
+        "str": f'{prefix}{degrees}°{minutes:02d}\'{seconds:05.2f}"',
     }
 
-def _parse_dms(dms_str):
-    # 1. 提取出度、分、秒的纯数字
-    parts = re.findall(r"[\d.]+", dms_str)
-    
-    # 2. 先计算出坐标的十进制绝对值
-    absolute_deg = float(parts[0]) + float(parts[1])/60 + float(parts[2])/3600
-    
-    # 3. 捕捉负号：如果输入字符串中带有负号（代表西经或南纬），则转换为负数
-    if '-' in dms_str:
-        return -absolute_deg
-    return absolute_deg
 
-def _parse_timezone(tz_str):
-    r"""
-    解析时区偏移字符串，支持三种格式：纯小时('+8')、时:分('-5:30')、小数小时('+5.5')。
-
-    原正则 r'^([+-]?)(\d{1,2})(:?)(\d{0,2})$' 无法匹配小数点：遇到调用.ipynb 注释里
-    明确写着支持的 '+5.5' 这类格式时，re.match 返回 None，下一行 match.group(1)
-    会直接抛出 AttributeError，而不是一个说明原因的错误。
-    """
-    tz_str = tz_str.strip()
-    match = re.match(r'^([+-]?)(\d{1,2})(?::(\d{1,2})|\.(\d+))?$', tz_str)
-    if not match:
-        raise ValueError(f"❌ 无法解析时区字符串: '{tz_str}'。支持的格式如: '+8'、'-5:30'、'+5.5'。")
-
-    sign = -1 if match.group(1) == '-' else 1
-    hours = float(match.group(2))
-
-    if match.group(3) is not None:          # 'HH:MM' 格式
-        hours += float(match.group(3)) / 60
-    elif match.group(4) is not None:        # 'HH.分数' 小数小时格式
-        hours = float(f"{match.group(2)}.{match.group(4)}")
-
-    return sign * hours
-
-# --- 历法转换辅助函数 ---
-def _parse_local_time_and_convert_to_gregorian(local_time_str, calendar='g'):
-    """
-    解析本地时间字符串，统一转换为格里历 datetime 对象，无精度损失。
-    """
-    try:
-        dt = datetime.strptime(local_time_str, "%Y-%m-%d %H:%M:%S.%f")
-    except ValueError:
-        dt = datetime.strptime(local_time_str, "%Y-%m-%d %H:%M:%S")
-
-    if calendar.lower() == 'g':
-        return dt  # 已是格里历，直接返回
-
-    # 儒略历 -> 格里历：通过 swe 官方函数精确转换
-    hour_dec = (dt.hour
-                + dt.minute / 60.0
-                + dt.second / 3600.0
-                + dt.microsecond / 3600000000.0)
-
-    # 按儒略历日期计算儒略日（JD）
-    jd = swe.julday(dt.year, dt.month, dt.day, hour_dec, swe.JUL_CAL)
-
-    # 将 JD 转回格里历
-    g_year, g_month, g_day, g_h_dec = swe.revjul(jd, swe.GREG_CAL)
-
-    # 将格里历小时小数拆回时、分、秒、微秒
-    g_h  = int(g_h_dec)
-    g_md = (g_h_dec - g_h) * 60.0
-    g_m  = int(g_md)
-    g_sd = (g_md - g_m) * 60.0
-    g_s  = int(g_sd)
-    g_us = round((g_sd - g_s) * 1_000_000)
-
-    return datetime(int(g_year), int(g_month), int(g_day), g_h, g_m, g_s, g_us)
-
-# --- 主计算函数 ---
-def calculate_positions(
-    local_time_str, timezone_str, latitude_str, longitude_str, elevation=0.0,
-    ecliptic_mode='sidereal', ayanamsha_mode='SIDM_KRISHNAMURTI',
-    node_mode='mean', house_system='Placidus', ephe_path=None, 
-    strict_ephe=True, **kwargs
-):
-    """
-    计算给定时间和地点的行星和宫位位置。
-    
-    参数:
-        strict_ephe (bool): 
-            若为 True（默认），当请求 Swiss Ephemeris 高精度计算却因缺少 .se1 文件导致
-            底层静默回退为 Moshier 粗算公式时，立即抛出 FileNotFoundError；
-            若为 False，则仅发出警告并继续使用粗算值。
-    """
-    # 统一设置星历路径，不覆盖已有有效配置
-    current_ephe_dir = _setup_ephe_path(ephe_path)
-
-    # 智能转换岁差模式：支持字符串输入（解析逻辑与 calculate_fixed_stars 共用，见 _resolve_ayanamsha_mode）
-    real_ayanamsha_mode = _resolve_ayanamsha_mode(ayanamsha_mode)
-
-    # 1. 解析输入参数
-    calendar = kwargs.get('calendar', 'g')
-    local_dt = _parse_local_time_and_convert_to_gregorian(local_time_str, calendar)
-    latitude = _parse_dms(latitude_str)
-    longitude = _parse_dms(longitude_str)
-    timezone_offset = _parse_timezone(timezone_str)
-
-    # 2. 计算儒略日 (Julian Day)
-    utc_time = local_dt - timedelta(hours=timezone_offset)
-    jd_utc = swe.julday(
-        utc_time.year, utc_time.month, utc_time.day,
-        utc_time.hour + utc_time.minute / 60.0
-            + utc_time.second / 3600.0
-            + utc_time.microsecond / 3600000000.0,
-        swe.GREG_CAL
-    )
-
-    # 预先计算真实黄赤交角，使用 [0] 避免 2/3 参数解包不匹配
-    _eps_raw = swe.calc_ut(jd_utc, swe.ECL_NUT, 0)[0]
-    eps = _eps_raw[0]  # 真实黄赤交角（度），约 23.4°
-
-    # 3. 设置星历计算标志
-    if ecliptic_mode == 'sidereal':
-        swe.set_sid_mode(real_ayanamsha_mode)
-        flag = swe.FLG_SIDEREAL | swe.FLG_SWIEPH | swe.FLG_SPEED
-        house_flag = swe.FLG_SIDEREAL
+def _parse_timezone(value: str | float | int) -> float:
+    if isinstance(value, (int, float)):
+        offset = float(value)
     else:
-        flag = swe.FLG_SWIEPH | swe.FLG_SPEED
-        house_flag = 0
+        text = str(value).strip()
+        match = re.fullmatch(r"([+-]?)(\d{1,2})(?::(\d{1,2})|\.(\d+))?", text)
+        if not match:
+            raise ValueError(f"无法解析时区 {value!r}；支持 +8、-5:30、+5.5。")
+        sign = -1.0 if match.group(1) == "-" else 1.0
+        hours = float(match.group(2))
+        if match.group(3) is not None:
+            minutes = int(match.group(3))
+            if minutes >= 60:
+                raise ValueError("时区分钟必须小于 60。")
+            hours += minutes / 60.0
+        elif match.group(4) is not None:
+            hours = float(f"{match.group(2)}.{match.group(4)}")
+        offset = sign * hours
+    if not -14.0 <= offset <= 14.0:
+        raise ValueError("时区偏移必须在 -14 到 +14 小时之间。")
+    return offset
 
-    # 4. 计算行星位置
-    planet_positions = {}     
-    dignity_results = PLANET_DIGNITIES.copy()
 
-    node_flag = swe.TRUE_NODE if node_mode == 'true' else swe.MEAN_NODE
-    planet_map = {
-        swe.SUN: 'Su', swe.MOON: 'Mo', swe.MERCURY: 'Me', swe.VENUS: 'Ve',
-        swe.MARS: 'Ma', swe.JUPITER: 'Ju', swe.SATURN: 'Sa', swe.URANUS: 'Ur',
-        swe.NEPTUNE: 'Ne', swe.PLUTO: 'Pl', node_flag: 'Ra'
-    }
-
-    selected_minor_planets = kwargs.get('selected_minor_planets', [])
-    for code in selected_minor_planets:
-        if code in MINOR_PLANET_CATALOG:
-            planet_map[MINOR_PLANET_CATALOG[code]] = code
-
-    selected_planets = kwargs.get('selected_planets', None)
-
-    for p_id, name in planet_map.items():
-        should_calc = False
-        if selected_planets is None or 'All' in selected_planets:
-            should_calc = True
-        else:
-            if name in selected_planets:
-                should_calc = True
-            if p_id == node_flag and ('Ra' in selected_planets or 'Ke' in selected_planets):
-                should_calc = True
-            if name in selected_minor_planets:
-                should_calc = True
-        
-        if not should_calc:
-            continue
-
-        # 执行黄道坐标计算并捕获返回标志
-        calc_res = swe.calc_ut(jd_utc, p_id, flag)
-        xx = calc_res[0]
-        ret_flag = calc_res[1] if len(calc_res) > 1 and isinstance(calc_res[1], int) else None
-
-        # 校验是否发生静默降级（毛病一修复）
-        if (flag & swe.FLG_SWIEPH) and ret_flag is not None:
-            is_moseph = bool(hasattr(swe, 'FLG_MOSEPH') and (ret_flag & swe.FLG_MOSEPH))
-            is_missing_swieph = not bool(ret_flag & swe.FLG_SWIEPH)
-            if is_moseph or is_missing_swieph:
-                err_msg = (
-                    f"❌ 高精度星历缺失：计算 '{name}' (ID: {p_id}) 在 JD {jd_utc:.4f} 处未能加载 "
-                    f"Swiss Ephemeris 高精度数据文件 (.se1)，底层已静默降级为 Moshier 粗算公式。"
-                    f"当前星历搜索路径为: '{current_ephe_dir}'。"
-                )
-                if strict_ephe:
-                    raise FileNotFoundError(err_msg)
-                else:
-                    warnings.warn(err_msg, RuntimeWarning)
-
-        # 执行赤道坐标计算
-        calc_eq_res = swe.calc_ut(jd_utc, p_id, flag | swe.FLG_EQUATORIAL)
-        xx_eq = calc_eq_res[0]
-        
-        if name != 'Ra' or (selected_planets is None or 'All' in selected_planets or 'Ra' in selected_planets):
-            planet_positions[name] = {
-                'lon': xx[0] % 360,
-                'lat': xx[1],
-                'speed': xx[3],
-                'ra': xx_eq[0],
-                'dec': xx_eq[1],
-                'dec_speed': xx_eq[4]
-            }
-        
-        if p_id == node_flag:
-            if selected_planets is None or 'All' in selected_planets or 'Ke' in selected_planets:
-                south_lon = (xx[0] + 180) % 360
-                south_lat = -xx[1]
-                pos_ecl_south = (south_lon, south_lat, xx[2])
-                # swe.cotrans: 黄道->赤道时 eps 需取负值（pysweph 文档："From ecliptical
-                # to equatorial, obliquity must be negative"），此前误传了 +eps。
-                pos_eq_south = swe.cotrans(pos_ecl_south, -eps)
-                planet_positions['Ke'] = {
-                    'lon': south_lon,
-                    'lat': south_lat,
-                    'speed': xx[3],
-                    'ra': pos_eq_south[0],
-                    'dec': pos_eq_south[1],
-                    'dec_speed': -xx_eq[4]
-                }
-
-    # 5. 计算宫位位置
-    house_positions = {}
-    # house_codes 现为模块级常量，见文件顶部定义（已覆盖 pysweph 全部 24 种宫位制）
-
-    if house_system in house_codes:
-        target_asc = None
-        jd_for_houses = jd_utc
-
-        kp_horary_params = kwargs.get("KP_HORARY", None)
-
-        if kp_horary_params and kp_horary_params.get('is_active', False):
-            print("🔮 已进入卜卦计算模式（仅调整宫位）...")
-            horary_mode = kp_horary_params.get("mode")
-            horary_number = kp_horary_params.get("number")
-
-            if not horary_mode or horary_number is None:
-                raise ValueError("卜卦字典中缺少 'mode' 或 'number' 参数。")
-
-            df = _load_sub_sub_table()
-
-            if horary_mode.upper() == "KS-N":
-                COLUMN, RESULT_COLUMN = "KS-N", "KS-D"
-            else:
-                COLUMN, RESULT_COLUMN = "CIL-N", "From"
-                
-            target_row = df[df[COLUMN] == horary_number]
-            if target_row.empty:
-                raise ValueError(f"在卜卦文件中找不到编号 {horary_number}")
-            target_asc = float(target_row.iloc[0][RESULT_COLUMN])
-            
-            def find_correct_time(target_asc_lon, initial_jd, lat, lon, hs_code, flags, tolerance=1e-7, max_iter=100):
-                jd_low, jd_high = initial_jd - 1.0, initial_jd + 1.0
-                for _ in range(max_iter):
-                    jd_mid = (jd_low + jd_high) / 2
-                    houses_mid_raw = swe.houses_ex(jd_mid, lat, lon, hs_code, flags=flags)[0]
-                    houses_mid = _extract_12_cusps(houses_mid_raw)
-                    current_asc = houses_mid[0] % 360
-                    diff = (current_asc - target_asc_lon + 180) % 360 - 180
-                    if abs(diff) < tolerance:
-                        return jd_mid
-                    if diff > 0:
-                        jd_high = jd_mid
-                    else:
-                        jd_low = jd_mid
-                return jd_mid
-
-            house_flag = swe.FLG_SIDEREAL if ecliptic_mode == 'sidereal' else 0
-            hs_code_bytes = house_codes.get(house_system)
-            
-            jd_for_houses = find_correct_time(target_asc, jd_utc, latitude, longitude, hs_code_bytes, house_flag)
-
-        res_h = swe.houses_ex2(
-            jd_for_houses, latitude, longitude, house_codes[house_system], flags=house_flag
-        )
-        houses_raw = res_h[0]
-        ascmc = res_h[1]
-        houses_speed_raw = res_h[2]
-        
-        houses = _extract_12_cusps(houses_raw)
-        houses_speed = _extract_12_cusps(houses_speed_raw)
-        
-        for i, cusp_lon in enumerate(houses):
-            final_lon = cusp_lon % 360
-            
-            if target_asc is not None:
-                if i == 0:
-                    final_lon = target_asc
-                elif i == 6:
-                    final_lon = (target_asc + 180.0) % 360.0
-
-            current_speed = houses_speed[i]
-
-            pos_ecl = (final_lon, 0.0, 1.0)
-            # 同上：黄道->赤道换算，eps 需取负值
-            pos_eq = swe.cotrans(pos_ecl, -eps)
-            house_positions[f"house {i+1}"] = {
-                'lon': final_lon,
-                'lat': 0.0,
-                'speed': current_speed,
-                'ra': pos_eq[0],
-                'dec': pos_eq[1],
-                'dec_speed': 0.0
-            }
-
-    # 按照用户配置顺序重组字典
-    if selected_planets and 'All' not in selected_planets:
-        ordered_pos = {k: planet_positions[k] for k in selected_planets if k in planet_positions}
-        for k, v in planet_positions.items():
-            if k not in ordered_pos:
-                ordered_pos[k] = v
-        planet_positions = ordered_pos
-
-    # 把字典分拣成"主行星"和"小行星"两个
-    MAIN_PLANETS = {'Su', 'Mo', 'Me', 'Ve', 'Ma', 'Ju', 'Sa', 'Ur', 'Ne', 'Pl', 'Ra', 'Ke'}
-
-    main_planet_positions = {}
-    minor_planet_positions = {}
-
-    for key, value in planet_positions.items():
-        if key in MAIN_PLANETS:
-            main_planet_positions[key] = value
-        else:
-            minor_planet_positions[key] = value
-    
-    return main_planet_positions, house_positions, ascmc, jd_utc, dignity_results, minor_planet_positions
-
-# --- 独立计算函数：日出与值日星 ---
-def get_sun_rise_and_lord(birth_config, sunrise_config, ephe_path=None):
-    """
-    独立计算日出时间及值日星。
-    支持传入 ephe_path 或从 birth_config 中读取 ephe_path，不会覆写已有的全局星历配置。
-    """
-    effective_ephe_path = ephe_path or birth_config.get('ephe_path')
-    _setup_ephe_path(effective_ephe_path)
-
-    lat = _parse_dms(birth_config['latitude_str'])
-    lon = _parse_dms(birth_config['longitude_str'])
-    alt = birth_config.get('elevation', 0.0)
-    
-    local_dt_str = birth_config['local_time_str']
-    calendar = birth_config.get('calendar', 'g')
-    local_dt = _parse_local_time_and_convert_to_gregorian(local_dt_str, calendar)
-
-    local_midnight = local_dt.replace(hour=0, minute=0, second=0, microsecond=0)
-    
-    tz_offset = _parse_timezone(birth_config['timezone_str'])
-    utc_midnight = local_midnight - timedelta(hours=tz_offset)
-    
-    jd_start = swe.julday(
-        utc_midnight.year, utc_midnight.month, utc_midnight.day,
-        utc_midnight.hour + utc_midnight.minute/60.0 + utc_midnight.second/3600.0
-    )
-
-    press = birth_config.get('atpress', 1013.25) 
-    temp = birth_config.get('attemp', 10.0)  
-    rsmi = sunrise_config.get('rsmi', swe.CALC_RISE | swe.BIT_DISC_CENTER)
-    
-    try:
-        geopos = (lon, lat, alt)
-        res = swe.rise_trans(
-            jd_start,
-            swe.SUN,
-            rsmi,
-            geopos,
-            press,
-            temp,
-            swe.FLG_SWIEPH
-        )
-        
-        rise_jd = 0.0
-        # rise_trans 固定返回 (int res, (tret)) 二元组，res[1][0] 即事件儒略日；
-        # 迁移指南未将 rise_trans 列入返回值有变的函数，故无需像 calc_ut/houses
-        # 那样做形状猜测。
-        ret_flag, tret = res
-        rise_jd = tret[0]
-        
-        if ret_flag < 0 or rise_jd <= 1.0:
-            return {'error': f"Sunrise not found. Flag={ret_flag}, JD={rise_jd}. (Polar region?)"}
-            
-    except Exception as e:
-        return {'error': f"SwissEph Error: {e}"}
-
-    try:
-        y, m, d, h_decimal = swe.revjul(rise_jd)
-        
-        h = int(h_decimal)
-        min_full = (h_decimal - h) * 60
-        mi = int(min_full)
-        s = (min_full - mi) * 60
-        micro = int((s - int(s)) * 1000000)
-        
-        rise_dt_utc = datetime(y, m, d, h, mi, int(s), micro)
-        rise_dt_local = rise_dt_utc + timedelta(hours=tz_offset)
-        
-    except ValueError as e:
-        return {'error': f"Date Conversion Error: {e} (JD={rise_jd})"}
-
-    current_iso_weekday = local_dt.weekday()
-    
-    if local_dt < rise_dt_local:
-        effective_weekday = (current_iso_weekday - 1) % 7
+def _parse_coordinate(value: str | float | int, *, latitude: bool) -> float:
+    if isinstance(value, (int, float)):
+        result = float(value)
     else:
-        effective_weekday = current_iso_weekday
+        text = str(value).strip().upper()
+        parts = re.findall(r"\d+(?:\.\d+)?", text)
+        if not parts:
+            raise ValueError(f"无法解析坐标 {value!r}。")
+        degrees = float(parts[0])
+        minutes = float(parts[1]) if len(parts) > 1 else 0.0
+        seconds = float(parts[2]) if len(parts) > 2 else 0.0
+        if minutes >= 60 or seconds >= 60:
+            raise ValueError(f"坐标分、秒必须小于 60：{value!r}")
+        result = degrees + minutes / 60.0 + seconds / 3600.0
+        if "-" in text or any(mark in text for mark in ("S", "W", "南", "西")):
+            result = -result
+    limit = 90.0 if latitude else 180.0
+    if not -limit <= result <= limit:
+        kind = "纬度" if latitude else "经度"
+        raise ValueError(f"{kind}超出有效范围：{result}")
+    return result
 
-    chaldean_map = {
-        0: 'Mo', 1: 'Ma', 2: 'Me', 3: 'Ju', 4: 'Ve', 5: 'Sa', 6: 'Su'
-    }
-    
-    return {
-        'sunrise_time_local': str(rise_dt_local),
-        'day_lord': chaldean_map.get(effective_weekday, 'Unknown'),
-        'is_before_sunrise': local_dt < rise_dt_local
-    }
 
-# --- 独立函数：计算恒星位置 ---
-def calculate_fixed_stars(
-    jd_utc, selected_stars, ecliptic_mode='tropical', 
-    ayanamsha_mode='SIDM_KRISHNAMURTI', ephe_path=None, strict_ephe=True
-):
-    """
-    计算给定儒略日下，一组恒星的位置。
-    支持显式 ephe_path 注入，并校验恒星数据文件缺失时的降级行为。
-    """
-    current_ephe_dir = _setup_ephe_path(ephe_path)
-
-    if ecliptic_mode == 'sidereal':
-        swe.set_sid_mode(_resolve_ayanamsha_mode(ayanamsha_mode))
-        flag = swe.FLG_SIDEREAL | swe.FLG_SWIEPH | swe.FLG_SPEED
+def _parse_civil_datetime(value: str | datetime, calendar: str) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
     else:
-        flag = swe.FLG_SWIEPH | swe.FLG_SPEED
-
-    fixed_star_positions = {}
-
-    for star_name in selected_stars:
+        text = str(value).strip().replace("T", " ")
         try:
-            res_star = swe.fixstar2_ut(star_name, jd_utc, flag)
-            # fixstar2_ut 固定返回 (xx, stnam, retflags) 三元组，pysweph 迁移指南
-            # 里列出的 breaking change 只涉及 calc/calc_ut/houses 系列，不含 fixstar，
-            # 故此处无需像 calc_ut 那样做 2/3 元组兼容。
-            xx = res_star[0]
-            ret_flag = res_star[2]
+            parsed = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError(f"无法解析本地时间 {value!r}，请使用 YYYY-MM-DD HH:MM:SS[.ffffff]。") from exc
+    if parsed.tzinfo is not None:
+        raise ValueError("local_time_str 应是不带时区的当地钟表时间；时区请由 timezone_str 单独传入。")
 
-            # 校验恒星高精度文件
-            if (flag & swe.FLG_SWIEPH) and ret_flag is not None:
-                is_moseph = bool(hasattr(swe, 'FLG_MOSEPH') and (ret_flag & swe.FLG_MOSEPH))
-                is_missing_swieph = not bool(ret_flag & swe.FLG_SWIEPH)
-                if is_moseph or is_missing_swieph:
-                    err_msg = (
-                        f"❌ 恒星数据缺失：计算恒星 '{star_name}' 时未能加载对应高精度数据文件。"
-                        f"当前星历搜索路径为: '{current_ephe_dir}'。"
-                    )
-                    if strict_ephe:
-                        raise FileNotFoundError(err_msg)
-                    else:
-                        warnings.warn(err_msg, RuntimeWarning)
+    cal = calendar.lower()
+    if cal not in {"g", "j"}:
+        raise ValueError("calendar 只能是 'g'（格里历）或 'j'（儒略历）。")
+    if cal == "g":
+        return parsed
 
-            res_star_eq = swe.fixstar2_ut(star_name, jd_utc, flag | swe.FLG_EQUATORIAL)
-            xx_eq = res_star_eq[0]
+    hour = (
+        parsed.hour
+        + parsed.minute / 60.0
+        + parsed.second / 3600.0
+        + parsed.microsecond / 3_600_000_000.0
+    )
+    jd = swe.julday(parsed.year, parsed.month, parsed.day, hour, swe.JUL_CAL)
+    year, month, day_, hour_decimal = swe.revjul(jd, swe.GREG_CAL)
+    midnight = datetime(int(year), int(month), int(day_))
+    return midnight + timedelta(hours=hour_decimal)
 
-            fixed_star_positions[star_name] = {
-                'lon':       xx[0] % 360,
-                'lat':       xx[1],
-                'speed':     xx[3],
-                'ra':        xx_eq[0],
-                'dec':       xx_eq[1],
-                'dec_speed': xx_eq[4]
-            }
 
-        except Exception as e:
-            if strict_ephe and isinstance(e, FileNotFoundError):
-                raise e
-            print(f"⚠️ 恒星 '{star_name}' 计算失败，已跳过。原因：{e}")
-            continue
+def _datetime_to_jd(dt_utc: datetime) -> float:
+    dt = dt_utc.astimezone(timezone.utc)
+    hour = dt.hour + dt.minute / 60.0 + dt.second / 3600.0 + dt.microsecond / 3_600_000_000.0
+    return swe.julday(dt.year, dt.month, dt.day, hour, swe.GREG_CAL)
 
-    return fixed_star_positions
 
-# --- 计算行星时 (Planetary Hour) ---
-def get_planetary_hour(birth_config, sunrise_config, ephe_path=None):
+def _jd_to_local(jd_utc: float, tzinfo: timezone) -> datetime:
+    year, month, day_, hour_decimal = swe.revjul(jd_utc, swe.GREG_CAL)
+    dt_utc = datetime(int(year), int(month), int(day_), tzinfo=timezone.utc) + timedelta(hours=hour_decimal)
+    return dt_utc.astimezone(tzinfo)
+
+
+def parse_time_geo(
+    local_time_str: str | datetime,
+    timezone_str: str | float,
+    latitude_str: str | float,
+    longitude_str: str | float,
+    *,
+    calendar: str = "g",
+    elevation: float = 0.0,
+    atpress: float = 1013.25,
+    attemp: float = 10.0,
+    ephe_path: str | Path | None = None,
+) -> AstroContext:
+    """解析时间与地理输入，返回所有后续函数共享的不可变上下文。"""
+    tz_offset = _parse_timezone(timezone_str)
+    tzinfo = timezone(timedelta(hours=tz_offset))
+    civil_dt = _parse_civil_datetime(local_time_str, calendar)
+    local_dt = civil_dt.replace(tzinfo=tzinfo)
+    utc_dt = local_dt.astimezone(timezone.utc)
+    jd_utc = _datetime_to_jd(utc_dt)
+    lat = _parse_coordinate(latitude_str, latitude=True)
+    lon = _parse_coordinate(longitude_str, latitude=False)
+    with _SWISS_LOCK:
+        active_path = set_ephemeris_path(ephe_path)
+        eps = float(swe.calc_ut(jd_utc, swe.ECL_NUT, 0)[0][0])
+    return AstroContext(
+        jd_utc=jd_utc,
+        lat=lat,
+        lon=lon,
+        eps=eps,
+        local_dt=local_dt,
+        utc_dt=utc_dt,
+        tz_offset=tz_offset,
+        elevation=float(elevation),
+        atpress=float(atpress),
+        attemp=float(attemp),
+        calendar=calendar.lower(),
+        ephe_path=active_path,
+    )
+
+
+def _resolve_ayanamsha(value: str | int) -> int:
+    if isinstance(value, int):
+        return value
+    clean = str(value).replace("swe.", "").strip().upper()
+    candidates = (clean, f"SE_{clean}", clean.replace("SIDM_", "SE_SIDM_"))
+    for name in candidates:
+        if hasattr(swe, name):
+            return int(getattr(swe, name))
+    raise ValueError(f"找不到岁差模式：{value!r}")
+
+
+def _position_flags(ecliptic_mode: str, ayanamsha_mode: str | int, heliocentric: bool) -> int:
+    mode = ecliptic_mode.lower()
+    if mode not in {"tropical", "sidereal"}:
+        raise ValueError("ecliptic_mode 只能是 'tropical' 或 'sidereal'。")
+    flags = swe.FLG_SWIEPH | swe.FLG_SPEED
+    if mode == "sidereal":
+        swe.set_sid_mode(_resolve_ayanamsha(ayanamsha_mode))
+        flags |= swe.FLG_SIDEREAL
+    if heliocentric:
+        flags |= swe.FLG_HELCTR
+    return flags
+
+
+def _check_ephemeris_result(ret_flag: int | None, requested_flags: int, label: str, strict: bool) -> None:
+    if ret_flag is None or not (requested_flags & swe.FLG_SWIEPH):
+        return
+    used_moshier = bool(getattr(swe, "FLG_MOSEPH", 0) & ret_flag)
+    missing_swiss = not bool(ret_flag & swe.FLG_SWIEPH)
+    if not (used_moshier or missing_swiss):
+        return
+    message = (
+        f"{label} 未使用 Swiss Ephemeris 高精度文件，已回退到 Moshier；"
+        f"当前星历目录：{_ACTIVE_EPHE_PATH!r}。"
+    )
+    if strict:
+        raise FileNotFoundError(message)
+    warnings.warn(message, RuntimeWarning, stacklevel=3)
+
+
+def _calc_body(jd_utc: float, body_id: int, flags: int, label: str, strict_ephe: bool) -> dict[str, float]:
+    ecliptic_result = swe.calc_ut(jd_utc, body_id, flags)
+    equatorial_result = swe.calc_ut(jd_utc, body_id, flags | swe.FLG_EQUATORIAL)
+    xx = ecliptic_result[0]
+    eq = equatorial_result[0]
+    ret_flag = ecliptic_result[1] if len(ecliptic_result) > 1 and isinstance(ecliptic_result[1], int) else None
+    _check_ephemeris_result(ret_flag, flags, label, strict_ephe)
+    return {
+        "lon": float(xx[0] % 360.0),
+        "lat": float(xx[1]),
+        "speed": float(xx[3]),
+        "ra": float(eq[0] % 360.0),
+        "dec": float(eq[1]),
+    }
+
+
+def calculate_planets(
+    context: AstroContext,
+    selected_planets: Sequence[str] | None = None,
+    *,
+    ecliptic_mode: str = "sidereal",
+    ayanamsha_mode: str | int = "SIDM_KRISHNAMURTI",
+    node_mode: str = "mean",
+    heliocentric: bool = False,
+    strict_ephe: bool = True,
+    ephe_path: str | Path | None = None,
+) -> dict[str, dict[str, float]]:
+    """仅计算主行星及交点的黄经、纬度、速度、赤经和赤纬。"""
+    effective_ephe_path = ephe_path if ephe_path is not None else context.ephe_path
+    requested = list(MAIN_PLANETS) + ["Ra", "Ke"] if selected_planets is None or "All" in selected_planets else list(selected_planets)
+    unknown = set(requested) - set(MAIN_PLANETS) - {"Ra", "Ke"}
+    if unknown:
+        raise ValueError(f"未知主行星代码：{sorted(unknown)}")
+    node_mode = node_mode.lower()
+    if node_mode not in {"mean", "true"}:
+        raise ValueError("node_mode 只能是 'mean' 或 'true'。")
+
+    result: dict[str, dict[str, float]] = {}
+    with _SWISS_LOCK:
+        set_ephemeris_path(effective_ephe_path)
+        base_flags = _position_flags(ecliptic_mode, ayanamsha_mode, heliocentric)
+        for name in requested:
+            if name in {"Ra", "Ke"} or name in result:
+                continue
+            result[name] = _calc_body(context.jd_utc, MAIN_PLANETS[name], base_flags, name, strict_ephe)
+
+        if "Ra" in requested or "Ke" in requested:
+            node_id = swe.TRUE_NODE if node_mode == "true" else swe.MEAN_NODE
+            # 月交点是地心定义；即使其余天体使用日心，也不把 HELCTR 施加到交点。
+            node_flags = base_flags & ~swe.FLG_HELCTR
+            north = _calc_body(context.jd_utc, node_id, node_flags, "Ra/Ke", strict_ephe)
+            if "Ra" in requested:
+                result["Ra"] = north
+            if "Ke" in requested:
+                # 南交点是北交点在天球上的严格反点；直接反转赤道坐标，
+                # 避免把恒星黄经误当作热带黄经交给 cotrans。
+                result["Ke"] = {
+                    "lon": (north["lon"] + 180.0) % 360.0,
+                    "lat": -north["lat"],
+                    "speed": north["speed"],
+                    "ra": (north["ra"] + 180.0) % 360.0,
+                    "dec": -north["dec"],
+                }
+    return {name: result[name] for name in requested if name in result}
+
+
+def calculate_minor_planets(
+    context: AstroContext,
+    selected_minor_planets: Sequence[str] | None = None,
+    *,
+    ecliptic_mode: str = "sidereal",
+    ayanamsha_mode: str | int = "SIDM_KRISHNAMURTI",
+    heliocentric: bool = False,
+    strict_ephe: bool = True,
+    ephe_path: str | Path | None = None,
+) -> dict[str, dict[str, float]]:
+    """仅计算指定小行星的黄经、纬度、速度、赤经和赤纬。"""
+    effective_ephe_path = ephe_path if ephe_path is not None else context.ephe_path
+    requested = list(selected_minor_planets or ())
+    unknown = set(requested) - set(MINOR_PLANETS)
+    if unknown:
+        raise ValueError(f"未知小行星代码：{sorted(unknown)}；可用值：{sorted(MINOR_PLANETS)}")
+    result: dict[str, dict[str, float]] = {}
+    with _SWISS_LOCK:
+        set_ephemeris_path(effective_ephe_path)
+        flags = _position_flags(ecliptic_mode, ayanamsha_mode, heliocentric)
+        for name in requested:
+            result[name] = _calc_body(context.jd_utc, MINOR_PLANETS[name], flags, name, strict_ephe)
+    return result
+
+
+def calculate_fixed_stars(
+    context_or_jd: AstroContext | float,
+    selected_stars: Iterable[str],
+    *,
+    ecliptic_mode: str = "tropical",
+    ayanamsha_mode: str | int = "SIDM_KRISHNAMURTI",
+    strict_ephe: bool = True,
+    skip_errors: bool = False,
+    ephe_path: str | Path | None = None,
+) -> dict[str, dict[str, float]]:
+    """仅计算恒星的黄经、纬度、速度、赤经和赤纬。"""
+    context_path = context_or_jd.ephe_path if isinstance(context_or_jd, AstroContext) else None
+    effective_ephe_path = ephe_path if ephe_path is not None else context_path
+    jd_utc = context_or_jd.jd_utc if isinstance(context_or_jd, AstroContext) else float(context_or_jd)
+    result: dict[str, dict[str, float]] = {}
+    with _SWISS_LOCK:
+        set_ephemeris_path(effective_ephe_path)
+        flags = _position_flags(ecliptic_mode, ayanamsha_mode, False)
+        for star_name in selected_stars:
+            try:
+                ecliptic_result = swe.fixstar2_ut(star_name, jd_utc, flags)
+                equatorial_result = swe.fixstar2_ut(star_name, jd_utc, flags | swe.FLG_EQUATORIAL)
+                xx, eq = ecliptic_result[0], equatorial_result[0]
+                ret_flag = ecliptic_result[2] if len(ecliptic_result) > 2 else None
+                _check_ephemeris_result(ret_flag, flags, f"恒星 {star_name}", strict_ephe)
+                result[star_name] = {
+                    "lon": float(xx[0] % 360.0),
+                    "lat": float(xx[1]),
+                    "speed": float(xx[3]),
+                    "ra": float(eq[0] % 360.0),
+                    "dec": float(eq[1]),
+                }
+            except Exception as exc:
+                if not skip_errors:
+                    raise ValueError(f"恒星 {star_name!r} 计算失败：{exc}") from exc
+    return result
+
+
+def _extract_12(values: Sequence[float]) -> list[float]:
+    if len(values) >= 13:
+        return [float(value) for value in values[1:13]]
+    if len(values) == 12:
+        return [float(value) for value in values]
+    raise RuntimeError(f"宫位函数返回了非预期长度：{len(values)}")
+
+
+def _house_flags(ecliptic_mode: str, ayanamsha_mode: str | int) -> int:
+    mode = ecliptic_mode.lower()
+    if mode == "sidereal":
+        swe.set_sid_mode(_resolve_ayanamsha(ayanamsha_mode))
+        return swe.FLG_SIDEREAL
+    if mode == "tropical":
+        return 0
+    raise ValueError("ecliptic_mode 只能是 'tropical' 或 'sidereal'。")
+
+
+def _ecliptic_point(
+    longitude: float,
+    speed: float,
+    eps: float,
+    ayanamsha: float,
+) -> dict[str, float]:
+    """把宫头/轴点统一转换为与行星相同的坐标结构。"""
+    longitude %= 360.0
+    # houses_ex2 的恒星黄经先加回同一时刻、同一 flags 的岁差值，
+    # 再转换为物理上对应点的赤经赤纬。
+    tropical_longitude = (longitude + ayanamsha) % 360.0
+    equatorial = swe.cotrans((tropical_longitude, 0.0, 1.0), -eps)
+    return {
+        "lon": longitude,
+        "lat": 0.0,
+        "speed": float(speed),
+        "ra": float(equatorial[0] % 360.0),
+        "dec": float(equatorial[1]),
+    }
+
+
+def calculate_houses(
+    context: AstroContext,
+    house_system: str = "Placidus",
+    *,
+    ecliptic_mode: str = "sidereal",
+    ayanamsha_mode: str | int = "SIDM_KRISHNAMURTI",
+    jd_utc: float | None = None,
+    ephe_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """独立计算 12 宫头、四轴和 Swiss Ephemeris 辅助轴点。
+
+    返回结构：
+        ``houses``: ``house 1`` 至 ``house 12``；
+        ``axes``: Asc / Desc / MC / IC 四轴；
+        ``auxiliary_points``: ARMC、Vertex 及 Swiss Ephemeris 其余轴点。
+
+    Whole Sign、Equal 等宫位制下，MC 不一定等于第 10 宫宫头，因此四轴
+    必须直接取 ``ascmc``，不能从宫头推断。
     """
-    计算当前时间对应的行星时 (Planetary Hour)。
-    逻辑：根据日出日落将白天和黑夜各分12等分，起始星为值日星，按迦勒底序列顺推。
-    支持传入 ephe_path 或从 birth_config 中读取 ephe_path，保持全局星历路径稳定。
-    """
-    effective_ephe_path = ephe_path or birth_config.get('ephe_path')
-    _setup_ephe_path(effective_ephe_path)
+    if house_system == "Gauquelin":
+        raise ValueError("Gauquelin 返回 36 个 sector，不属于 12 宫接口。")
+    if house_system not in HOUSE_SYSTEMS:
+        raise ValueError(f"未知宫位制 {house_system!r}；可用值：{sorted(HOUSE_SYSTEMS)}")
 
-    lat = _parse_dms(birth_config['latitude_str'])
-    lon = _parse_dms(birth_config['longitude_str'])
-    alt = birth_config.get('elevation', 0.0)
-    tz_offset = _parse_timezone(birth_config['timezone_str'])
-    
-    local_dt_str = birth_config['local_time_str']
-    calendar = birth_config.get('calendar', 'g')
-    local_dt = _parse_local_time_and_convert_to_gregorian(local_dt_str, calendar)
-
-    def calc_sun_events(target_date):
-        midnight_local = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
-        midnight_utc = midnight_local - timedelta(hours=tz_offset)
-        jd_start = swe.julday(
-            midnight_utc.year, midnight_utc.month, midnight_utc.day,
-            midnight_utc.hour + midnight_utc.minute/60.0
+    target_jd = context.jd_utc if jd_utc is None else float(jd_utc)
+    effective_ephe_path = ephe_path if ephe_path is not None else context.ephe_path
+    with _SWISS_LOCK:
+        # 宫位是可被单独局部刷新的公开入口，因此必须自行恢复星历路径和岁差状态。
+        set_ephemeris_path(effective_ephe_path)
+        flags = _house_flags(ecliptic_mode, ayanamsha_mode)
+        raw = swe.houses_ex2(
+            target_jd,
+            context.lat,
+            context.lon,
+            HOUSE_SYSTEMS[house_system],
+            flags=flags,
         )
-        
-        geopos = (lon, lat, alt)
-        press = birth_config.get('atpress', 1013.25)
-        temp = birth_config.get('attemp', 10.0)
-        
-        user_rsmi = sunrise_config.get('rsmi', swe.CALC_RISE | swe.BIT_DISC_CENTER)
-        style_flags = user_rsmi & ~swe.CALC_RISE & ~swe.CALC_SET
-        
-        flag_rise = swe.CALC_RISE | style_flags
-        flag_set = swe.CALC_SET | style_flags
+        cusps = _extract_12(raw[0])
+        ascmc = [float(value) for value in raw[1]]
+        cusp_speeds = _extract_12(raw[2])
+        ascmc_speeds = [float(value) for value in raw[3]]
+        target_eps = float(swe.calc_ut(target_jd, swe.ECL_NUT, 0)[0][0])
+        ayanamsha = (
+            float(swe.get_ayanamsa_ex_ut(target_jd, flags)[1])
+            if ecliptic_mode.lower() == "sidereal"
+            else 0.0
+        )
 
-        # rise_trans 固定返回 (int, (tret)) 二元组，见 get_sun_rise_and_lord 中说明
-        res_rise = swe.rise_trans(jd_start, swe.SUN, flag_rise, geopos, press, temp, swe.FLG_SWIEPH)
-        rise_jd = res_rise[1][0]
-        
-        res_set = swe.rise_trans(jd_start, swe.SUN, flag_set, geopos, press, temp, swe.FLG_SWIEPH)
-        set_jd = res_set[1][0]
+        houses = {
+            f"house {index}": _ecliptic_point(longitude, speed, target_eps, ayanamsha)
+            for index, (longitude, speed) in enumerate(zip(cusps, cusp_speeds), start=1)
+        }
 
-        def jd_to_local(jd_val):
-            y, m, d, h_dec = swe.revjul(jd_val)
-            h = int(h_dec)
-            mn = int((h_dec - h) * 60)
-            s = (h_dec - h - mn/60) * 3600
-            dt_utc = datetime(y, m, d, h, mn, int(s), int((s-int(s))*1000000))
-            return dt_utc + timedelta(hours=tz_offset)
+        asc = _ecliptic_point(ascmc[0], ascmc_speeds[0], target_eps, ayanamsha)
+        mc = _ecliptic_point(ascmc[1], ascmc_speeds[1], target_eps, ayanamsha)
+        desc = _ecliptic_point(
+            (ascmc[0] + 180.0) % 360.0,
+            ascmc_speeds[0],
+            target_eps,
+            ayanamsha,
+        )
+        ic = _ecliptic_point(
+            (ascmc[1] + 180.0) % 360.0,
+            ascmc_speeds[1],
+            target_eps,
+            ayanamsha,
+        )
+        axes = {"Asc": asc, "Desc": desc, "MC": mc, "IC": ic}
 
-        return jd_to_local(rise_jd), jd_to_local(set_jd)
-
-    rise_today, set_today = calc_sun_events(local_dt)
-    
-    is_day_time = False
-    start_time = None
-    end_time = None
-    astrological_day_start = None
-    
-    if local_dt < rise_today:
-        rise_prev, set_prev = calc_sun_events(local_dt - timedelta(days=1))
-        is_day_time = False
-        start_time = set_prev
-        end_time = rise_today
-        astrological_day_start = rise_prev
-        
-    elif local_dt >= set_today:
-        rise_next, set_next = calc_sun_events(local_dt + timedelta(days=1))
-        is_day_time = False
-        start_time = set_today
-        end_time = rise_next
-        astrological_day_start = rise_today
-        
-    else:
-        is_day_time = True
-        start_time = rise_today
-        end_time = set_today
-        astrological_day_start = rise_today
-
-    total_duration = (end_time - start_time).total_seconds()
-    elapsed = (local_dt - start_time).total_seconds()
-    hour_length = total_duration / 12.0
-    
-    hour_idx = int(elapsed / hour_length)
-    if hour_idx >= 12:
-        hour_idx = 11
-
-    chaldean_order = ['Sa', 'Ju', 'Ma', 'Su', 'Ve', 'Me', 'Mo']
-    weekday_map = {0: 6, 1: 2, 2: 5, 3: 1, 4: 4, 5: 0, 6: 3}
-    
-    astro_weekday = astrological_day_start.weekday()
-    day_lord_idx = weekday_map[astro_weekday]
-    
-    offset = hour_idx
-    if not is_day_time:
-        offset += 12
-        
-    final_idx = (day_lord_idx + offset) % 7
-    planet_lord = chaldean_order[final_idx]
+        auxiliary_points = {
+            # ARMC 是赤道坐标角，不是黄经，故不伪装成 lon/ra/dec 坐标结构。
+            "ARMC": {"angle": ascmc[2] % 360.0, "speed": ascmc_speeds[2]},
+            "Vertex": _ecliptic_point(ascmc[3], ascmc_speeds[3], target_eps, ayanamsha),
+            "Equatorial Ascendant": _ecliptic_point(
+                ascmc[4], ascmc_speeds[4], target_eps, ayanamsha
+            ),
+            "Co-Ascendant (Koch)": _ecliptic_point(
+                ascmc[5], ascmc_speeds[5], target_eps, ayanamsha
+            ),
+            "Co-Ascendant (Munkasey)": _ecliptic_point(
+                ascmc[6], ascmc_speeds[6], target_eps, ayanamsha
+            ),
+            "Polar Ascendant": _ecliptic_point(
+                ascmc[7], ascmc_speeds[7], target_eps, ayanamsha
+            ),
+        }
 
     return {
-        'planetary_hour_lord': planet_lord,
-        'is_day_time': is_day_time,
-        'hour_index': hour_idx + 1,
-        'hour_start': str(start_time + timedelta(seconds=hour_idx*hour_length)),
-        'hour_end': str(start_time + timedelta(seconds=(hour_idx+1)*hour_length))
+        "house_system": house_system,
+        "ecliptic_mode": ecliptic_mode.lower(),
+        "jd_utc": target_jd,
+        "houses": houses,
+        "axes": axes,
+        "auxiliary_points": auxiliary_points,
+    }
+
+
+def _ascendant_at(jd_utc: float, lat: float, lon: float, system_code: bytes, flags: int) -> float:
+    # Ascendant 始终取 ascmc[0]，不能用第一宫宫头代替；Whole Sign、Vehlow 等
+    # 宫位制的第一宫宫头并不等于真实上升点。
+    ascmc = swe.houses_ex(jd_utc, lat, lon, system_code, flags=flags)[1]
+    return float(ascmc[0] % 360.0)
+
+
+def _find_ascendant_time(
+    target: float,
+    initial_jd: float,
+    lat: float,
+    lon: float,
+    system_code: bytes,
+    flags: int,
+    *,
+    tolerance: float = 1e-8,
+    max_iter: int = 80,
+) -> float:
+    """先采样找最近的过零区间，再二分；搜索中只保留上升点。"""
+    target %= 360.0
+    step = 1.0 / 144.0  # 10 分钟
+    samples = [initial_jd - 0.55 + index * step for index in range(160)]
+    angles = [_ascendant_at(jd, lat, lon, system_code, flags) for jd in samples]
+    unwrapped = [angles[0]]
+    for angle in angles[1:]:
+        previous_mod = unwrapped[-1] % 360.0
+        delta = (angle - previous_mod + 180.0) % 360.0 - 180.0
+        unwrapped.append(unwrapped[-1] + delta)
+
+    brackets: list[tuple[float, float, float, float]] = []
+    minimum = min(unwrapped)
+    maximum = max(unwrapped)
+    first_k = int((minimum - target) // 360.0) - 1
+    last_k = int((maximum - target) // 360.0) + 1
+    for k in range(first_k, last_k + 1):
+        target_unwrapped = target + 360.0 * k
+        for index in range(len(samples) - 1):
+            left_value = unwrapped[index] - target_unwrapped
+            right_value = unwrapped[index + 1] - target_unwrapped
+            if left_value == 0.0 or left_value * right_value <= 0.0:
+                brackets.append((samples[index], samples[index + 1], target_unwrapped, unwrapped[index]))
+    if not brackets:
+        raise RuntimeError("无法在出生时刻附近找到目标上升点；高纬地区可尝试更换宫位制。")
+    left, right, target_unwrapped, left_angle = min(
+        brackets, key=lambda item: abs((item[0] + item[1]) / 2.0 - initial_jd)
+    )
+
+    for _ in range(max_iter):
+        mid = (left + right) / 2.0
+        angle = _ascendant_at(mid, lat, lon, system_code, flags)
+        cycles = round((target_unwrapped - angle) / 360.0)
+        mid_angle = angle + cycles * 360.0
+        difference = mid_angle - target_unwrapped
+        if abs(difference) <= tolerance:
+            return mid
+        if (left_angle - target_unwrapped) * difference <= 0.0:
+            right = mid
+        else:
+            left = mid
+            left_angle = mid_angle
+    return (left + right) / 2.0
+
+
+def solve_horary_houses(
+    context: AstroContext,
+    number: int,
+    *,
+    mode: str = "KS-N",
+    house_system: str = "Placidus",
+    ecliptic_mode: str = "sidereal",
+    ayanamsha_mode: str | int = "SIDM_KRISHNAMURTI",
+    tolerance: float = 1e-8,
+    ephe_path: str | Path | None = None,
+    kp_table_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """由 249/2193 签号反推上升点，定位后仅调用一次完整宫位求解器。"""
+    if house_system not in HOUSE_SYSTEMS or house_system == "Gauquelin":
+        raise ValueError(f"卜卦不支持宫位制：{house_system!r}")
+    try:
+        from .kp import get_horary_ascendant
+    except ImportError:  # 允许将 core.py 与 kp.py 放在同一普通目录直接导入
+        from kp import get_horary_ascendant
+
+    target_asc = get_horary_ascendant(number, mode=mode, table_path=kp_table_path)
+    effective_ephe_path = ephe_path if ephe_path is not None else context.ephe_path
+    with _SWISS_LOCK:
+        # 卜卦搜索也是独立入口，不能假设此前调用过时间解析或行星函数。
+        set_ephemeris_path(effective_ephe_path)
+        flags = _house_flags(ecliptic_mode, ayanamsha_mode)
+        solved_jd = _find_ascendant_time(
+            target_asc,
+            context.jd_utc,
+            context.lat,
+            context.lon,
+            HOUSE_SYSTEMS[house_system],
+            flags,
+            tolerance=tolerance,
+        )
+    house_result = calculate_houses(
+        context,
+        house_system,
+        ecliptic_mode=ecliptic_mode,
+        ayanamsha_mode=ayanamsha_mode,
+        jd_utc=solved_jd,
+        ephe_path=effective_ephe_path,
+    )
+    return {
+        "number": int(number),
+        "mode": mode.upper(),
+        "target_asc": target_asc,
+        "solved_jd_utc": solved_jd,
+        "solved_local_dt": _jd_to_local(solved_jd, context.local_dt.tzinfo),
+        "house_system": house_result["house_system"],
+        "ecliptic_mode": house_result["ecliptic_mode"],
+        "houses": house_result["houses"],
+        "axes": house_result["axes"],
+        "auxiliary_points": house_result["auxiliary_points"],
+    }
+
+
+def _coerce_date(value: date | datetime | str | None, default: date) -> date:
+    if value is None:
+        return default
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
+
+
+def _sun_event(
+    context: AstroContext,
+    target_date: date,
+    event_flag: int,
+    style_flags: int,
+) -> tuple[float, datetime]:
+    local_midnight = datetime.combine(target_date, time.min, tzinfo=context.local_dt.tzinfo)
+    jd_start = _datetime_to_jd(local_midnight.astimezone(timezone.utc))
+    result_flag, event_times = swe.rise_trans(
+        jd_start,
+        swe.SUN,
+        event_flag | style_flags,
+        (context.lon, context.lat, context.elevation),
+        context.atpress,
+        context.attemp,
+        swe.FLG_SWIEPH,
+    )
+    event_jd = float(event_times[0])
+    if result_flag < 0 or event_jd <= 1.0:
+        event_name = "日出" if event_flag == swe.CALC_RISE else "日落"
+        raise ValueError(f"{target_date} 无法计算{event_name}（可能处于极昼/极夜区域）。")
+    return event_jd, _jd_to_local(event_jd, context.local_dt.tzinfo)
+
+
+def calculate_sunrise_sunset(
+    context: AstroContext,
+    target_date: date | datetime | str | None = None,
+    *,
+    rsmi: int | None = None,
+    ephe_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """统一、精确计算指定当地日期的日出和日落。"""
+    effective_ephe_path = ephe_path if ephe_path is not None else context.ephe_path
+    local_date = _coerce_date(target_date, context.local_dt.date())
+    user_flags = swe.BIT_DISC_CENTER if rsmi is None else int(rsmi)
+    style_flags = user_flags & ~(swe.CALC_RISE | swe.CALC_SET)
+    with _SWISS_LOCK:
+        set_ephemeris_path(effective_ephe_path)
+        rise_jd, sunrise = _sun_event(context, local_date, swe.CALC_RISE, style_flags)
+        set_jd, sunset = _sun_event(context, local_date, swe.CALC_SET, style_flags)
+    if sunrise.date() != local_date or sunset.date() != local_date:
+        raise ValueError(
+            f"{local_date} 当地并非同时存在日出和日落（可能处于极昼/极夜过渡期）；"
+            "不会用相邻日期事件冒充当天事件。"
+        )
+    return {
+        "date": local_date.isoformat(),
+        "sunrise_local": sunrise,
+        "sunset_local": sunset,
+        "sunrise_jd_utc": rise_jd,
+        "sunset_jd_utc": set_jd,
+    }
+
+
+def calculate_day_lord(
+    context: AstroContext,
+    sun_events: Mapping[str, Any] | None = None,
+    *,
+    rsmi: int | None = None,
+) -> dict[str, Any]:
+    """按“日出换日”规则计算迦勒底值日星。"""
+    events = dict(sun_events) if sun_events is not None else calculate_sunrise_sunset(context, rsmi=rsmi)
+    sunrise = events["sunrise_local"]
+    if isinstance(sunrise, str):
+        sunrise = datetime.fromisoformat(sunrise)
+    before_sunrise = context.local_dt < sunrise
+    astrological_date = context.local_dt.date() - timedelta(days=1 if before_sunrise else 0)
+    return {
+        "day_lord": WEEKDAY_LORDS[astrological_date.weekday()],
+        "astrological_date": astrological_date.isoformat(),
+        "is_before_sunrise": before_sunrise,
+        "sunrise_local": sunrise,
+    }
+
+
+def calculate_planetary_hour(
+    context: AstroContext,
+    *,
+    rsmi: int | None = None,
+    ephe_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """按昼、夜各十二等分计算当前行星时。"""
+    effective_ephe_path = ephe_path if ephe_path is not None else context.ephe_path
+    today = calculate_sunrise_sunset(context, rsmi=rsmi, ephe_path=effective_ephe_path)
+    sunrise_today = today["sunrise_local"]
+    sunset_today = today["sunset_local"]
+
+    if context.local_dt < sunrise_today:
+        previous = calculate_sunrise_sunset(
+            context, context.local_dt.date() - timedelta(days=1), rsmi=rsmi, ephe_path=effective_ephe_path
+        )
+        period_start, period_end = previous["sunset_local"], sunrise_today
+        astrological_date = context.local_dt.date() - timedelta(days=1)
+        daytime = False
+        base_offset = 12
+    elif context.local_dt >= sunset_today:
+        following = calculate_sunrise_sunset(
+            context, context.local_dt.date() + timedelta(days=1), rsmi=rsmi, ephe_path=effective_ephe_path
+        )
+        period_start, period_end = sunset_today, following["sunrise_local"]
+        astrological_date = context.local_dt.date()
+        daytime = False
+        base_offset = 12
+    else:
+        period_start, period_end = sunrise_today, sunset_today
+        astrological_date = context.local_dt.date()
+        daytime = True
+        base_offset = 0
+
+    hour_seconds = (period_end - period_start).total_seconds() / 12.0
+    elapsed = max(0.0, (context.local_dt - period_start).total_seconds())
+    period_index = min(11, int(elapsed / hour_seconds))
+    hour_number = base_offset + period_index + 1
+    day_lord = WEEKDAY_LORDS[astrological_date.weekday()]
+    lord_index = CHALDEAN_ORDER.index(day_lord)
+    planetary_lord = CHALDEAN_ORDER[(lord_index + hour_number - 1) % 7]
+    hour_start = period_start + timedelta(seconds=period_index * hour_seconds)
+    hour_end = period_start + timedelta(seconds=(period_index + 1) * hour_seconds)
+
+    return {
+        "planetary_hour_lord": planetary_lord,
+        "day_lord": day_lord,
+        "astrological_date": astrological_date.isoformat(),
+        "is_day_time": daytime,
+        "hour_number": hour_number,
+        "period_hour": period_index + 1,
+        "hour_start": hour_start,
+        "hour_end": hour_end,
+        "hour_length_seconds": hour_seconds,
     }
