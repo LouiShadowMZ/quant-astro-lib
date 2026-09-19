@@ -12,7 +12,23 @@ from functools import lru_cache
 from importlib.resources import files
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping
+
+import swisseph as swe
+
+# solve_horary_houses 需要真正调用 core 的宫位/星历计算，这是一个模块级、
+# 单向的依赖（kp 依赖 core，而不是 core 反过来 import kp）。_SWISS_LOCK、
+# _house_flags、_jd_to_local 是 core 内部的私有帮助函数，但两者同属一个包，
+# 包内共享属于正常用法；只是不会经 __init__.py 暴露给包外部使用者。
+from .core import (
+    AstroContext,
+    HOUSE_SYSTEMS,
+    _house_flags,
+    _jd_to_local,
+    _SWISS_LOCK,
+    calculate_houses,
+    set_ephemeris_path,
+)
 
 
 _NUMERIC_COLUMNS = {"From", "To", "Degree", "Min", "Second", "KS-N", "CIL-N", "KS-D", "paada"}
@@ -376,3 +392,124 @@ def get_ruling_planets(
 
 # 旧调用名保留为轻量别名，便于渐进迁移。
 get_significators = calculate_significators
+
+
+def _ascendant_at(jd_utc: float, lat: float, lon: float, system_code: bytes, flags: int) -> float:
+    # Ascendant 始终取 ascmc[0]，不能用第一宫宫头代替；Whole Sign、Vehlow 等
+    # 宫位制的第一宫宫头并不等于真实上升点。
+    ascmc = swe.houses_ex(jd_utc, lat, lon, system_code, flags=flags)[1]
+    return float(ascmc[0] % 360.0)
+
+
+def _find_ascendant_time(
+    target: float,
+    initial_jd: float,
+    lat: float,
+    lon: float,
+    system_code: bytes,
+    flags: int,
+    *,
+    tolerance: float = 1e-8,
+    max_iter: int = 80,
+) -> float:
+    """先采样找最近的过零区间，再二分；搜索中只保留上升点。"""
+    target %= 360.0
+    step = 1.0 / 144.0  # 10 分钟
+    samples = [initial_jd - 0.55 + index * step for index in range(160)]
+    angles = [_ascendant_at(jd, lat, lon, system_code, flags) for jd in samples]
+    unwrapped = [angles[0]]
+    for angle in angles[1:]:
+        previous_mod = unwrapped[-1] % 360.0
+        delta = (angle - previous_mod + 180.0) % 360.0 - 180.0
+        unwrapped.append(unwrapped[-1] + delta)
+
+    brackets: list[tuple[float, float, float, float]] = []
+    minimum = min(unwrapped)
+    maximum = max(unwrapped)
+    first_k = int((minimum - target) // 360.0) - 1
+    last_k = int((maximum - target) // 360.0) + 1
+    for k in range(first_k, last_k + 1):
+        target_unwrapped = target + 360.0 * k
+        for index in range(len(samples) - 1):
+            left_value = unwrapped[index] - target_unwrapped
+            right_value = unwrapped[index + 1] - target_unwrapped
+            if left_value == 0.0 or left_value * right_value <= 0.0:
+                brackets.append((samples[index], samples[index + 1], target_unwrapped, unwrapped[index]))
+    if not brackets:
+        raise RuntimeError("无法在出生时刻附近找到目标上升点；高纬地区可尝试更换宫位制。")
+    left, right, target_unwrapped, left_angle = min(
+        brackets, key=lambda item: abs((item[0] + item[1]) / 2.0 - initial_jd)
+    )
+
+    for _ in range(max_iter):
+        mid = (left + right) / 2.0
+        angle = _ascendant_at(mid, lat, lon, system_code, flags)
+        cycles = round((target_unwrapped - angle) / 360.0)
+        mid_angle = angle + cycles * 360.0
+        difference = mid_angle - target_unwrapped
+        if abs(difference) <= tolerance:
+            return mid
+        if (left_angle - target_unwrapped) * difference <= 0.0:
+            right = mid
+        else:
+            left = mid
+            left_angle = mid_angle
+    return (left + right) / 2.0
+
+
+def solve_horary_houses(
+    context: AstroContext,
+    number: int,
+    *,
+    mode: str = "KS-N",
+    house_system: str = "Placidus",
+    ecliptic_mode: str = "sidereal",
+    ayanamsha_mode: str | int = "SIDM_KRISHNAMURTI",
+    tolerance: float = 1e-8,
+    ephe_path: str | Path | None = None,
+    kp_table_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """由 249/2193 签号反推上升点，定位后仅调用一次完整宫位求解器。"""
+    # Gauquelin 不在 HOUSE_SYSTEMS 里，所以下面这一句必须先判断它，否则
+    # "not in HOUSE_SYSTEMS" 已经先成立，"== 'Gauquelin'" 永远轮不到、
+    # 报错信息也就说不出具体原因（core.calculate_houses 里就是这个顺序）。
+    if house_system == "Gauquelin":
+        raise ValueError("Gauquelin 返回 36 个 sector，不属于 12 宫接口，卜卦不支持。")
+    if house_system not in HOUSE_SYSTEMS:
+        raise ValueError(f"卜卦不支持宫位制：{house_system!r}")
+
+    target_asc = get_horary_ascendant(number, mode=mode, table_path=kp_table_path)
+    effective_ephe_path = ephe_path if ephe_path is not None else context.ephe_path
+    with _SWISS_LOCK:
+        # 卜卦搜索也是独立入口，不能假设此前调用过时间解析或行星函数。
+        set_ephemeris_path(effective_ephe_path)
+        flags = _house_flags(ecliptic_mode, ayanamsha_mode)
+        solved_jd = _find_ascendant_time(
+            target_asc,
+            context.jd_utc,
+            context.lat,
+            context.lon,
+            HOUSE_SYSTEMS[house_system],
+            flags,
+            tolerance=tolerance,
+        )
+    house_result = calculate_houses(
+        context,
+        house_system,
+        ecliptic_mode=ecliptic_mode,
+        ayanamsha_mode=ayanamsha_mode,
+        jd_utc=solved_jd,
+        ephe_path=effective_ephe_path,
+    )
+    return {
+        "number": int(number),
+        "mode": mode.upper(),
+        "target_asc": target_asc,
+        "solved_jd_utc": solved_jd,
+        "solved_local_dt": _jd_to_local(solved_jd, context.local_dt.tzinfo),
+        "house_system": house_result["house_system"],
+        "ecliptic_mode": house_result["ecliptic_mode"],
+        "houses": house_result["houses"],
+        "axes": house_result["axes"],
+        "auxiliary_points": house_result["auxiliary_points"],
+    }

@@ -1,7 +1,9 @@
 """可按依赖局部重算的占星底座。
 
 本模块只负责输入解析、Swiss Ephemeris 坐标/宫位计算，以及依赖时间的
-日出日落、值日星和行星时。KP 查表与象意逻辑位于 :mod:`kp`。
+日出日落、值日星和行星时。KP 查表、象意逻辑，以及依赖 KP 查表反推
+上升点的卜卦入口 solve_horary_houses，统一放在 :mod:`kp` 里——
+本模块不反向 import kp，只保留单向依赖（kp 依赖 core，而非相反）。
 """
 
 from __future__ import annotations
@@ -11,7 +13,6 @@ import threading
 import warnings
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timedelta, timezone
-from functools import lru_cache
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -310,16 +311,28 @@ def _position_flags(ecliptic_mode: str, ayanamsha_mode: str | int, heliocentric:
     return flags
 
 
-def _check_ephemeris_result(ret_flag: int | None, requested_flags: int, label: str, strict: bool) -> None:
+def _check_ephemeris_result(
+    ret_flag: int | None,
+    requested_flags: int,
+    label: str,
+    strict: bool,
+    serr: str = "",
+) -> None:
     if ret_flag is None or not (requested_flags & swe.FLG_SWIEPH):
         return
-    used_moshier = bool(getattr(swe, "FLG_MOSEPH", 0) & ret_flag)
+    # FLG_MOSEPH 是 pysweph/pyswisseph 的标准常量，不用 getattr(..., 0) 兜底——
+    # 那样万一它哪天真的取不到，会让这个 strict_ephe=True 的安全检查悄悄失效
+    # 而不是报错提醒我们，反而更危险。
+    used_moshier = bool(swe.FLG_MOSEPH & ret_flag)
     missing_swiss = not bool(ret_flag & swe.FLG_SWIEPH)
     if not (used_moshier or missing_swiss):
         return
+    # pysweph >= 2.10.3.3 起，calc()/calc_ut() 等函数会在返回值里多带一条
+    # serr 字符串，通常直接写明具体缺了哪个星历文件，比我们自己拼的提示更准确。
+    detail = f"；Swiss Ephemeris 提示：{serr}" if serr else ""
     message = (
         f"{label} 未使用 Swiss Ephemeris 高精度文件，已回退到 Moshier；"
-        f"当前星历目录：{_ACTIVE_EPHE_PATH!r}。"
+        f"当前星历目录：{_ACTIVE_EPHE_PATH!r}{detail}。"
     )
     if strict:
         raise FileNotFoundError(message)
@@ -332,7 +345,10 @@ def _calc_body(jd_utc: float, body_id: int, flags: int, label: str, strict_ephe:
     xx = ecliptic_result[0]
     eq = equatorial_result[0]
     ret_flag = ecliptic_result[1] if len(ecliptic_result) > 1 and isinstance(ecliptic_result[1], int) else None
-    _check_ephemeris_result(ret_flag, flags, label, strict_ephe)
+    # pysweph >= 2.10.3.3 的 calc_ut() 返回 (xx, retflags, serr) 三元组；
+    # 旧版 pyswisseph 只有二元组，len(...) > 2 的判断让两种版本都能正常工作。
+    serr = ecliptic_result[2] if len(ecliptic_result) > 2 and isinstance(ecliptic_result[2], str) else ""
+    _check_ephemeris_result(ret_flag, flags, label, strict_ephe, serr=serr)
     return {
         "lon": float(xx[0] % 360.0),
         "lat": float(xx[1]),
@@ -588,126 +604,6 @@ def calculate_houses(
         "houses": houses,
         "axes": axes,
         "auxiliary_points": auxiliary_points,
-    }
-
-
-def _ascendant_at(jd_utc: float, lat: float, lon: float, system_code: bytes, flags: int) -> float:
-    # Ascendant 始终取 ascmc[0]，不能用第一宫宫头代替；Whole Sign、Vehlow 等
-    # 宫位制的第一宫宫头并不等于真实上升点。
-    ascmc = swe.houses_ex(jd_utc, lat, lon, system_code, flags=flags)[1]
-    return float(ascmc[0] % 360.0)
-
-
-def _find_ascendant_time(
-    target: float,
-    initial_jd: float,
-    lat: float,
-    lon: float,
-    system_code: bytes,
-    flags: int,
-    *,
-    tolerance: float = 1e-8,
-    max_iter: int = 80,
-) -> float:
-    """先采样找最近的过零区间，再二分；搜索中只保留上升点。"""
-    target %= 360.0
-    step = 1.0 / 144.0  # 10 分钟
-    samples = [initial_jd - 0.55 + index * step for index in range(160)]
-    angles = [_ascendant_at(jd, lat, lon, system_code, flags) for jd in samples]
-    unwrapped = [angles[0]]
-    for angle in angles[1:]:
-        previous_mod = unwrapped[-1] % 360.0
-        delta = (angle - previous_mod + 180.0) % 360.0 - 180.0
-        unwrapped.append(unwrapped[-1] + delta)
-
-    brackets: list[tuple[float, float, float, float]] = []
-    minimum = min(unwrapped)
-    maximum = max(unwrapped)
-    first_k = int((minimum - target) // 360.0) - 1
-    last_k = int((maximum - target) // 360.0) + 1
-    for k in range(first_k, last_k + 1):
-        target_unwrapped = target + 360.0 * k
-        for index in range(len(samples) - 1):
-            left_value = unwrapped[index] - target_unwrapped
-            right_value = unwrapped[index + 1] - target_unwrapped
-            if left_value == 0.0 or left_value * right_value <= 0.0:
-                brackets.append((samples[index], samples[index + 1], target_unwrapped, unwrapped[index]))
-    if not brackets:
-        raise RuntimeError("无法在出生时刻附近找到目标上升点；高纬地区可尝试更换宫位制。")
-    left, right, target_unwrapped, left_angle = min(
-        brackets, key=lambda item: abs((item[0] + item[1]) / 2.0 - initial_jd)
-    )
-
-    for _ in range(max_iter):
-        mid = (left + right) / 2.0
-        angle = _ascendant_at(mid, lat, lon, system_code, flags)
-        cycles = round((target_unwrapped - angle) / 360.0)
-        mid_angle = angle + cycles * 360.0
-        difference = mid_angle - target_unwrapped
-        if abs(difference) <= tolerance:
-            return mid
-        if (left_angle - target_unwrapped) * difference <= 0.0:
-            right = mid
-        else:
-            left = mid
-            left_angle = mid_angle
-    return (left + right) / 2.0
-
-
-def solve_horary_houses(
-    context: AstroContext,
-    number: int,
-    *,
-    mode: str = "KS-N",
-    house_system: str = "Placidus",
-    ecliptic_mode: str = "sidereal",
-    ayanamsha_mode: str | int = "SIDM_KRISHNAMURTI",
-    tolerance: float = 1e-8,
-    ephe_path: str | Path | None = None,
-    kp_table_path: str | Path | None = None,
-) -> dict[str, Any]:
-    """由 249/2193 签号反推上升点，定位后仅调用一次完整宫位求解器。"""
-    if house_system not in HOUSE_SYSTEMS or house_system == "Gauquelin":
-        raise ValueError(f"卜卦不支持宫位制：{house_system!r}")
-    try:
-        from .kp import get_horary_ascendant
-    except ImportError:  # 允许将 core.py 与 kp.py 放在同一普通目录直接导入
-        from kp import get_horary_ascendant
-
-    target_asc = get_horary_ascendant(number, mode=mode, table_path=kp_table_path)
-    effective_ephe_path = ephe_path if ephe_path is not None else context.ephe_path
-    with _SWISS_LOCK:
-        # 卜卦搜索也是独立入口，不能假设此前调用过时间解析或行星函数。
-        set_ephemeris_path(effective_ephe_path)
-        flags = _house_flags(ecliptic_mode, ayanamsha_mode)
-        solved_jd = _find_ascendant_time(
-            target_asc,
-            context.jd_utc,
-            context.lat,
-            context.lon,
-            HOUSE_SYSTEMS[house_system],
-            flags,
-            tolerance=tolerance,
-        )
-    house_result = calculate_houses(
-        context,
-        house_system,
-        ecliptic_mode=ecliptic_mode,
-        ayanamsha_mode=ayanamsha_mode,
-        jd_utc=solved_jd,
-        ephe_path=effective_ephe_path,
-    )
-    return {
-        "number": int(number),
-        "mode": mode.upper(),
-        "target_asc": target_asc,
-        "solved_jd_utc": solved_jd,
-        "solved_local_dt": _jd_to_local(solved_jd, context.local_dt.tzinfo),
-        "house_system": house_result["house_system"],
-        "ecliptic_mode": house_result["ecliptic_mode"],
-        "houses": house_result["houses"],
-        "axes": house_result["axes"],
-        "auxiliary_points": house_result["auxiliary_points"],
     }
 
 

@@ -11,7 +11,7 @@ if os.path.exists('README.md'):
 
 setup(
     name='quant-astro',
-    version='0.1.8',  # 与 quant_astro/__init__.py 的 __version__ 保持一致
+    version='0.2.2',  # 与 quant_astro/__init__.py 的 __version__ 保持一致（此前两边分别是 0.1.8 / 0.2.1，对不上）
     author='Lucius',
     author_email='kristenrobi85@gmail.com',
     description='一个用于量化占星研究的Python库。',
@@ -19,20 +19,31 @@ setup(
     long_description_content_type='text/markdown',
     url='https://github.com/LouiShadowMZ/quant-astro-lib.git',
     packages=find_packages(),
-    
+
     # 包含了 data 和 ephe 目录下的所有文件
     package_data={
         'quant_astro': ['data/*', 'ephe/*'],
     },
     include_package_data=True,
-    
-    # 将 pyswisseph 替换为 pysweph；pytz 已用标准库 zoneinfo/timezone 替代，无需再声明
+
+    # 本次解耦范围（core.py + kp.py）只用到了 pysweph，没有 import pandas/numpy。
+    # pysweph>=2.10.3.3：这是 pysweph 这个 fork 的第一个发布版本；从这个版本起
+    # calc()/calc_ut() 等函数的返回值多了一条 serr 字符串，houses 系列的 cusps
+    # 数组从 2.10.3.4 起又改成了 13 项（index 0 留空）。core.py 的 _extract_12()
+    # 和 _calc_body() 已经用长度判断兼容了这两种格式，所以不需要卡上限，但至少
+    # 要卡住下限，明确声明"这份代码是针对哪个行为写的"。
     install_requires=[
-        'pysweph',
-        'pandas',
-        'numpy'
+        'pysweph>=2.10.3.3',
     ],
-    
+
+    # pandas/numpy 目前只有还没随这次重构解耦出来的 Dasha 模块会用到，
+    # 装 quant-astro 本体不该被迫带上这两个重量级依赖。等 Dasha 模块也
+    # 理清楚了、确认真的需要它们，再通过 `pip install quant-astro[dasha]`
+    # 按需安装。
+    extras_require={
+        'dasha': ['pandas', 'numpy'],
+    },
+
     classifiers=[
         'Programming Language :: Python :: 3',
         'License :: OSI Approved :: MIT License',

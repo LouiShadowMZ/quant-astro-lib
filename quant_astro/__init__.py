@@ -17,7 +17,6 @@ from .core import (
     decimal_to_dms,
     parse_time_geo,
     set_ephemeris_path,
-    solve_horary_houses,
 )
 from .kp import (
     SignificatorMaps,
@@ -32,9 +31,12 @@ from .kp import (
     kp_lookup,
     kp_lookup_many,
     load_kp_table,
+    solve_horary_houses,  # 本体现在住在 kp.py（它依赖 KP 查表反推上升点）
 )
 
-__version__ = "0.2.1"
+# 注意：此前这里写的是 "0.2.1"，但 setup.py 里 version='0.1.8'，两处对不上。
+# 这次顺带同步成一致的版本号，后续发布记得两边一起改。
+__version__ = "0.2.2"
 
 __all__ = [
     "AstroContext",
