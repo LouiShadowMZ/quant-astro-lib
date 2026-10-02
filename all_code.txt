@@ -1,0 +1,3813 @@
+﻿==========================================
+DIRECTORY TREE STRUCTURE
+==========================================
+卷 Data 的文件夹 PATH 列表
+卷序列号为 623A-CD6D
+D:.
+|   all_code.txt
+|   app.py
+|   profile_db.py
+|   README.md
+|   requirements_web.txt
+|   setup.py
+|   web_bridge.py
+|   调用.ipynb
+|   调用方法.txt
+|   
++---quant_astro
+|   |   core.py
+|   |   dasha_Vimshottari.py
+|   |   kp.py
+|   |   __init__.py
+|   |   
+|   +---data
+|   |       star.csv
+|   |       sub-sub.csv
+|   |       sub-sub原版.csv
+|   |       
+|   +---ephe
+|   |       seas_00.se1
+|   |       seas_06.se1
+|   |       seas_12.se1
+|   |       seas_18.se1
+|   |       sefstars.txt
+|   |       semo_18.se1
+|   |       sepl_18.se1
+|   |       
+|   \---__pycache__
+|           aspects.cpython-313.pyc
+|           attributes.cpython-313.pyc
+|           chart.cpython-313.pyc
+|           core.cpython-313.pyc
+|           dasha_Vimshottari.cpython-313.pyc
+|           dasha_Vimshottari_api.cpython-313.pyc
+|           kp.cpython-313.pyc
+|           points.cpython-313.pyc
+|           __init__.cpython-313.pyc
+|           
++---quant_astro.egg-info
+|       dependency_links.txt
+|       PKG-INFO
+|       requires.txt
+|       SOURCES.txt
+|       top_level.txt
+|       
++---static
+|       app.js
+|       style.css
+|       
++---templates
+|       index.html
+|       
++---user_data
+|       people.sqlite3
+|       settings.json
+|       
+\---__pycache__
+        profile_db.cpython-313.pyc
+        web_bridge.cpython-313.pyc
+        
+
+==========================================
+SOURCE CODES
+==========================================
+
+########## FILE: app.py ##########
+from __future__ import annotations
+
+from pathlib import Path
+from flask import Flask, jsonify, render_template, request
+
+from profile_db import ProfileDB
+from web_bridge import (
+    DEFAULT_SETTINGS,
+    calculate_full_chart,
+    calculate_partial_chart,
+    load_settings,
+    public_options,
+    safe_json,
+)
+
+BASE_DIR = Path(__file__).resolve().parent
+USER_DATA_DIR = BASE_DIR / "user_data"
+USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+app = Flask(
+    __name__,
+    template_folder=str(BASE_DIR / "templates"),
+    static_folder=str(BASE_DIR / "static"),
+)
+app.config["JSON_AS_ASCII"] = False
+
+settings = load_settings(BASE_DIR / "user_data" / "settings.json")
+profile_db = ProfileDB(BASE_DIR / "user_data" / "people.sqlite3")
+
+
+def ok(data=None, **extra):
+    payload = {"ok": True}
+    if data is not None:
+        payload["data"] = safe_json(data)
+    payload.update(safe_json(extra))
+    return jsonify(payload)
+
+
+def fail(message, status=400):
+    return jsonify({"ok": False, "error": str(message)}), status
+
+
+@app.get("/")
+def index():
+    return render_template("index.html")
+
+
+@app.get("/api/bootstrap")
+def bootstrap():
+    data = {
+        "settings": settings,
+        "options": public_options(),
+        "profiles": profile_db.list_profiles(),
+    }
+    return ok(data, **data)
+
+
+@app.post("/api/chart/full")
+def chart_full():
+    try:
+        payload = request.get_json(force=True) or {}
+        return ok(calculate_full_chart(payload))
+    except Exception as exc:
+        app.logger.exception("Full chart calculation failed")
+        return fail(exc, 400)
+
+
+@app.post("/api/chart/partial")
+def chart_partial():
+    try:
+        payload = request.get_json(force=True) or {}
+        return ok(calculate_partial_chart(payload))
+    except Exception as exc:
+        app.logger.exception("Partial chart calculation failed")
+        return fail(exc, 400)
+
+
+@app.post("/api/dasha/expand")
+def dasha_expand():
+    try:
+        from quant_astro.dasha_Vimshottari import expand_dasha_interval
+
+        payload = request.get_json(force=True) or {}
+        intervals = expand_dasha_interval(
+            planet=str(payload["planet"]),
+            start=str(payload["start"]),
+            duration_seconds=str(payload["duration_seconds"]),
+        )
+        return ok([item.to_dict(json_safe=True) for item in intervals])
+    except Exception as exc:
+        app.logger.exception("Dasha expansion failed")
+        return fail(exc, 400)
+
+
+@app.get("/api/profiles")
+def list_profiles():
+    return ok(profile_db.list_profiles())
+
+
+@app.get("/api/profiles/<int:profile_id>")
+def get_profile(profile_id):
+    item = profile_db.get_profile(profile_id)
+    if item is None:
+        return fail("人物档案不存在。", 404)
+    return ok(item)
+
+
+@app.post("/api/profiles")
+def create_profile():
+    try:
+        payload = request.get_json(force=True) or {}
+        return ok(profile_db.create_profile(payload))
+    except Exception as exc:
+        return fail(exc, 400)
+
+
+@app.put("/api/profiles/<int:profile_id>")
+def update_profile(profile_id):
+    try:
+        payload = request.get_json(force=True) or {}
+        item = profile_db.update_profile(profile_id, payload)
+        if item is None:
+            return fail("人物档案不存在。", 404)
+        return ok(item)
+    except Exception as exc:
+        return fail(exc, 400)
+
+
+@app.delete("/api/profiles/<int:profile_id>")
+def delete_profile(profile_id):
+    if not profile_db.delete_profile(profile_id):
+        return fail("人物档案不存在。", 404)
+    return ok({"deleted": profile_id})
+
+
+if __name__ == "__main__":
+    host = str(settings.get("server", {}).get("host", DEFAULT_SETTINGS["server"]["host"]))
+    port = int(settings.get("server", {}).get("port", DEFAULT_SETTINGS["server"]["port"]))
+    app.run(
+        host=host,
+        port=port,
+        debug=False,
+        use_reloader=False,
+        threaded=True,
+    )
+
+
+########## FILE: profile_db.py ##########
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+import sqlite3
+
+
+class ProfileDB:
+    def __init__(self, path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+
+    def _connect(self):
+        conn = sqlite3.connect(
+            self.path,
+            timeout=5.0,
+            isolation_level=None,
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = DELETE")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        return conn
+
+    def _init_db(self):
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS people (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    display_name TEXT NOT NULL,
+                    birth_time TEXT NOT NULL,
+                    timezone_offset TEXT NOT NULL,
+                    latitude REAL NOT NULL,
+                    longitude REAL NOT NULL,
+                    note TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_people_display_name
+                ON people(display_name COLLATE NOCASE)
+                """
+            )
+
+    @staticmethod
+    def _now():
+        return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _validate(data):
+        display_name = str(data.get("display_name", "")).strip()
+        birth_time = str(data.get("birth_time", "")).strip()
+        timezone_offset = str(data.get("timezone_offset", "")).strip()
+        note = str(data.get("note", "") or "")
+
+        if not display_name:
+            raise ValueError("人物名称不能为空。")
+        if not birth_time:
+            raise ValueError("出生时间不能为空。")
+        if not timezone_offset:
+            raise ValueError("时区不能为空。")
+
+        try:
+            latitude = float(data.get("latitude"))
+            longitude = float(data.get("longitude"))
+        except (TypeError, ValueError):
+            raise ValueError("经纬度必须是数字。")
+
+        if not -90 <= latitude <= 90:
+            raise ValueError("纬度必须位于 -90 到 90 之间。")
+        if not -180 <= longitude <= 180:
+            raise ValueError("经度必须位于 -180 到 180 之间。")
+
+        return {
+            "display_name": display_name,
+            "birth_time": birth_time,
+            "timezone_offset": timezone_offset,
+            "latitude": latitude,
+            "longitude": longitude,
+            "note": note,
+        }
+
+    @staticmethod
+    def _row_to_dict(row):
+        return None if row is None else dict(row)
+
+    def list_profiles(self):
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, display_name, birth_time, timezone_offset,
+                       latitude, longitude, note, created_at, updated_at
+                FROM people
+                ORDER BY display_name COLLATE NOCASE, id
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_profile(self, profile_id):
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM people WHERE id = ?",
+                (int(profile_id),),
+            ).fetchone()
+        return self._row_to_dict(row)
+
+    def create_profile(self, data):
+        clean = self._validate(data)
+        now = self._now()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO people (
+                    display_name, birth_time, timezone_offset,
+                    latitude, longitude, note, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    clean["display_name"],
+                    clean["birth_time"],
+                    clean["timezone_offset"],
+                    clean["latitude"],
+                    clean["longitude"],
+                    clean["note"],
+                    now,
+                    now,
+                ),
+            )
+            profile_id = int(cursor.lastrowid)
+        return self.get_profile(profile_id)
+
+    def update_profile(self, profile_id, data):
+        if self.get_profile(profile_id) is None:
+            return None
+
+        clean = self._validate(data)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE people
+                SET display_name = ?,
+                    birth_time = ?,
+                    timezone_offset = ?,
+                    latitude = ?,
+                    longitude = ?,
+                    note = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    clean["display_name"],
+                    clean["birth_time"],
+                    clean["timezone_offset"],
+                    clean["latitude"],
+                    clean["longitude"],
+                    clean["note"],
+                    self._now(),
+                    int(profile_id),
+                ),
+            )
+        return self.get_profile(profile_id)
+
+    def delete_profile(self, profile_id):
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM people WHERE id = ?",
+                (int(profile_id),),
+            )
+        return cursor.rowcount > 0
+
+
+########## FILE: setup.py ##########
+# setup.py
+
+from setuptools import setup, find_packages
+import os
+
+# 使用更安全的方式读取 README.md 文件作为项目详细描述
+long_description = ""
+if os.path.exists('README.md'):
+    with open('README.md', 'r', encoding='utf-8') as f:
+        long_description = f.read()
+
+setup(
+    name='quant-astro',
+    version='0.2.2',  # 与 quant_astro/__init__.py 的 __version__ 保持一致（此前两边分别是 0.1.8 / 0.2.1，对不上）
+    author='Lucius',
+    author_email='kristenrobi85@gmail.com',
+    description='一个用于量化占星研究的Python库。',
+    long_description=long_description,
+    long_description_content_type='text/markdown',
+    url='https://github.com/LouiShadowMZ/quant-astro-lib.git',
+    packages=find_packages(),
+
+    # 包含了 data 和 ephe 目录下的所有文件
+    package_data={
+        'quant_astro': ['data/*', 'ephe/*'],
+    },
+    include_package_data=True,
+
+    # 本次解耦范围（core.py + kp.py）只用到了 pysweph，没有 import pandas/numpy。
+    # pysweph>=2.10.3.3：这是 pysweph 这个 fork 的第一个发布版本；从这个版本起
+    # calc()/calc_ut() 等函数的返回值多了一条 serr 字符串，houses 系列的 cusps
+    # 数组从 2.10.3.4 起又改成了 13 项（index 0 留空）。core.py 的 _extract_12()
+    # 和 _calc_body() 已经用长度判断兼容了这两种格式，所以不需要卡上限，但至少
+    # 要卡住下限，明确声明"这份代码是针对哪个行为写的"。
+    install_requires=[
+        'pysweph>=2.10.3.3',
+    ],
+
+    # pandas/numpy 目前只有还没随这次重构解耦出来的 Dasha 模块会用到，
+    # 装 quant-astro 本体不该被迫带上这两个重量级依赖。等 Dasha 模块也
+    # 理清楚了、确认真的需要它们，再通过 `pip install quant-astro[dasha]`
+    # 按需安装。
+    extras_require={
+        'dasha': ['pandas', 'numpy'],
+    },
+
+    classifiers=[
+        'Programming Language :: Python :: 3',
+        'License :: OSI Approved :: MIT License',
+        'Operating System :: OS Independent',
+        'Intended Audience :: Science/Research',
+        'Topic :: Scientific/Engineering :: Astronomy',
+    ],
+    python_requires='>=3.8',
+)
+
+
+########## FILE: web_bridge.py ##########
+from __future__ import annotations
+
+from dataclasses import asdict, is_dataclass
+from datetime import date, datetime
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, Mapping
+import json
+
+import swisseph as swe
+
+from quant_astro import (
+    HOUSE_SYSTEMS,
+    MAIN_PLANETS,
+    MINOR_PLANETS,
+    calculate_day_lord,
+    calculate_fixed_stars,
+    calculate_houses,
+    calculate_minor_planets,
+    calculate_planetary_hour,
+    calculate_planets,
+    calculate_sunrise_sunset,
+    decimal_to_dms,
+    get_kp_lords,
+    get_ruling_planets,
+    get_significators,
+    kp_lookup,
+    parse_time_geo,
+    solve_horary_houses,
+)
+from quant_astro.dasha_Vimshottari import get_dasha_level1
+
+
+DEFAULT_SETTINGS = {
+    "server": {
+        "host": "127.0.0.1",
+        "port": 5000,
+    },
+    "default_location": {
+        "latitude": 23.0331389,
+        "longitude": 113.1010556,
+        "timezone": "+08:00",
+        "label": "默认地点",
+    },
+    "birth_defaults": {
+        "elevation": 0.0,
+        "atpress": 1013.25,
+        "attemp": 20.0,
+        "calendar": "g",
+    },
+    "calculation_defaults": {
+        "ecliptic_mode": "tropical",
+        "ayanamsha_mode": "SIDM_KRISHNAMURTI",
+        "node_mode": "mean",
+        "house_system": "Regiomontanus",
+        "heliocentric": False,
+        "strict_ephe": True,
+        "selected_planets": ["Su", "Mo", "Me", "Ve", "Ma", "Ju", "Sa", "Ra", "Ke"],
+        "selected_minor_planets": [],
+        "selected_stars": [
+            "Algol,bePer",
+            "Alcyone,etTau",
+            "Aldebaran,alTau",
+            "Capella,alAur",
+            "Sirius,alCMa",
+            "Procyon,alCMi",
+            "Regulus,alLeo",
+            "Algorab,deCrv",
+            "Spica,alVir",
+            "Arcturus,alBoo",
+            "Alphecca,alCrB",
+            "Antares,alSco",
+            "Vega,alLyr",
+            "DenebAlgedi,deCap",
+            "Fomalhaut,alPsA",
+        ],
+        "KP_HORARY": {
+            "is_active": False,
+            "mode": "KS-N",
+            "number": 78,
+        },
+        "sunrise_rsmi": int(swe.BIT_DISC_CENTER),
+        "dasha_days_in_year": 365.25,
+    },
+}
+
+
+def _deep_merge(base, override):
+    result = json.loads(json.dumps(base))
+    for key, value in override.items():
+        if isinstance(value, Mapping) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def load_settings(path):
+    path = Path(path)
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(DEFAULT_SETTINGS, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return json.loads(json.dumps(DEFAULT_SETTINGS))
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    return _deep_merge(DEFAULT_SETTINGS, raw)
+
+
+def safe_json(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if is_dataclass(value):
+        return safe_json(asdict(value))
+    if isinstance(value, Mapping):
+        return {str(k): safe_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [safe_json(v) for v in value]
+    if hasattr(value, "to_dict"):
+        try:
+            return safe_json(value.to_dict())
+        except TypeError:
+            return safe_json(value.to_dict(json_safe=True))
+    return str(value)
+
+
+def public_options():
+    return {
+        "house_systems": list(HOUSE_SYSTEMS.keys()),
+        "main_planets": list(MAIN_PLANETS.keys()) + ["Ra", "Ke"],
+        "minor_planets": list(MINOR_PLANETS.keys()),
+        "ecliptic_modes": ["tropical", "sidereal"],
+        "node_modes": ["mean", "true"],
+        "horary_modes": ["KS-N", "CIL-N"],
+    }
+
+
+def _required(payload, key):
+    value = payload.get(key)
+    if value is None or value == "":
+        raise ValueError(f"缺少必要参数：{key}")
+    return value
+
+
+def _normalize_input(payload):
+    birth = dict(payload.get("birth") or {})
+    options = dict(payload.get("options") or {})
+
+    result = {
+        "birth": {
+            "local_time_str": str(_required(birth, "local_time_str")),
+            "timezone_str": str(_required(birth, "timezone_str")),
+            "latitude_str": birth.get("latitude_str", birth.get("latitude")),
+            "longitude_str": birth.get("longitude_str", birth.get("longitude")),
+            "elevation": float(birth.get("elevation", 0.0)),
+            "atpress": float(birth.get("atpress", 1013.25)),
+            "attemp": float(birth.get("attemp", 20.0)),
+            "calendar": str(birth.get("calendar", "g")),
+        },
+        "options": {
+            "ecliptic_mode": str(options.get("ecliptic_mode", "tropical")),
+            "ayanamsha_mode": options.get("ayanamsha_mode", "SIDM_KRISHNAMURTI"),
+            "node_mode": str(options.get("node_mode", "mean")),
+            "house_system": str(options.get("house_system", "Regiomontanus")),
+            "heliocentric": bool(options.get("heliocentric", False)),
+            "strict_ephe": bool(options.get("strict_ephe", True)),
+            "selected_planets": list(
+                options.get(
+                    "selected_planets",
+                    ["Su", "Mo", "Me", "Ve", "Ma", "Ju", "Sa", "Ra", "Ke"],
+                )
+            ),
+            "selected_minor_planets": list(options.get("selected_minor_planets", [])),
+            "selected_stars": list(options.get("selected_stars", [])),
+            "KP_HORARY": dict(
+                options.get(
+                    "KP_HORARY",
+                    {"is_active": False, "mode": "KS-N", "number": 78},
+                )
+            ),
+            "sunrise_rsmi": int(options.get("sunrise_rsmi", swe.BIT_DISC_CENTER)),
+            "dasha_days_in_year": float(options.get("dasha_days_in_year", 365.25)),
+        },
+    }
+
+    if result["birth"]["latitude_str"] in (None, ""):
+        raise ValueError("缺少必要参数：latitude")
+    if result["birth"]["longitude_str"] in (None, ""):
+        raise ValueError("缺少必要参数：longitude")
+
+    return result
+
+
+def _format_point_map(items):
+    output = {}
+    for key, value in items.items():
+        item = dict(value)
+        raw = item.get("lon", item.get("angle"))
+        if raw is not None:
+            item["dms"] = decimal_to_dms(float(raw))["str"]
+        output[key] = item
+    return output
+
+
+def _calculate_context(normalized):
+    return parse_time_geo(**normalized["birth"])
+
+
+def _calculate_planet_group(context, options):
+    planet_pos = calculate_planets(
+        context,
+        options["selected_planets"],
+        ecliptic_mode=options["ecliptic_mode"],
+        ayanamsha_mode=options["ayanamsha_mode"],
+        node_mode=options["node_mode"],
+        heliocentric=options["heliocentric"],
+        strict_ephe=options["strict_ephe"],
+    )
+
+    minor_planet_pos = calculate_minor_planets(
+        context,
+        options["selected_minor_planets"],
+        ecliptic_mode=options["ecliptic_mode"],
+        ayanamsha_mode=options["ayanamsha_mode"],
+        heliocentric=options["heliocentric"],
+        strict_ephe=options["strict_ephe"],
+    )
+
+    fixed_star_pos = calculate_fixed_stars(
+        context,
+        options["selected_stars"],
+        ecliptic_mode=options["ecliptic_mode"],
+        ayanamsha_mode=options["ayanamsha_mode"],
+        strict_ephe=options["strict_ephe"],
+    )
+
+    return planet_pos, minor_planet_pos, fixed_star_pos
+
+
+def _calculate_house_group(context, options):
+    horary = options["KP_HORARY"]
+    if horary.get("is_active"):
+        return solve_horary_houses(
+            context,
+            int(horary["number"]),
+            mode=horary.get("mode", "KS-N"),
+            house_system=options["house_system"],
+            ecliptic_mode=options["ecliptic_mode"],
+            ayanamsha_mode=options["ayanamsha_mode"],
+        )
+
+    return calculate_houses(
+        context,
+        options["house_system"],
+        ecliptic_mode=options["ecliptic_mode"],
+        ayanamsha_mode=options["ayanamsha_mode"],
+    )
+
+
+def _calculate_sun_group(context, options):
+    sun_events = calculate_sunrise_sunset(
+        context,
+        rsmi=options["sunrise_rsmi"],
+    )
+    day_lord_result = calculate_day_lord(
+        context,
+        sun_events=sun_events,
+    )
+    planetary_hour_data = calculate_planetary_hour(
+        context,
+        rsmi=options["sunrise_rsmi"],
+    )
+    return sun_events, day_lord_result, planetary_hour_data
+
+
+def _calculate_kp_group(planet_pos, house_result, day_lord_result):
+    houses = house_result["houses"]
+    axes = house_result["axes"]
+
+    kp_planet_results, kp_house_results = get_kp_lords(
+        planet_pos,
+        houses,
+    )
+
+    kp_planet_sigs, kp_house_sigs = get_significators(
+        planet_pos,
+        houses,
+        kp_planet_results,
+        kp_house_results,
+    )
+
+    asc_kp_result = kp_lookup(axes["Asc"]["lon"])
+
+    kp_ruling_planets = get_ruling_planets(
+        kp_planet_results,
+        kp_house_results,
+        day_lord_result,
+        asc_kp_result=asc_kp_result,
+    )
+
+    return {
+        "kp_planet_results": kp_planet_results,
+        "kp_house_results": kp_house_results,
+        "kp_planet_sigs": kp_planet_sigs,
+        "kp_house_sigs": kp_house_sigs,
+        "asc_kp_result": asc_kp_result,
+        "kp_ruling_planets": kp_ruling_planets,
+    }
+
+
+def _calculate_dasha(context, planet_pos, options):
+    if "Mo" not in planet_pos:
+        return []
+
+    # 大运直接使用当前页面黄道体系下的月亮黄经。
+    moon_lon = float(planet_pos["Mo"]["lon"])
+    intervals = get_dasha_level1(
+        context,
+        moon_lon,
+        days_in_year=options["dasha_days_in_year"],
+    )
+    return [item.to_dict(json_safe=True) for item in intervals]
+
+
+def calculate_full_chart(payload):
+    normalized = _normalize_input(payload)
+    options = normalized["options"]
+    context = _calculate_context(normalized)
+
+    planet_pos, minor_planet_pos, fixed_star_pos = _calculate_planet_group(
+        context,
+        options,
+    )
+    house_result = _calculate_house_group(context, options)
+    sun_events, day_lord_result, planetary_hour_data = _calculate_sun_group(
+        context,
+        options,
+    )
+    kp = _calculate_kp_group(
+        planet_pos,
+        house_result,
+        day_lord_result,
+    )
+    dasha = _calculate_dasha(
+        context,
+        planet_pos,
+        options,
+    )
+
+    return safe_json(
+        {
+            "context": context.to_dict(json_safe=True),
+            "planet_pos": _format_point_map(planet_pos),
+            "minor_planet_pos": _format_point_map(minor_planet_pos),
+            "fixed_star_pos": _format_point_map(fixed_star_pos),
+            "house_result": {
+                **house_result,
+                "houses": _format_point_map(house_result["houses"]),
+                "axes": _format_point_map(house_result["axes"]),
+                "auxiliary_points": _format_point_map(
+                    house_result["auxiliary_points"]
+                ),
+            },
+            "sun_events": sun_events,
+            "day_lord_result": day_lord_result,
+            "planetary_hour_data": planetary_hour_data,
+            **kp,
+            "dasha_level1": dasha,
+        }
+    )
+
+
+def calculate_partial_chart(payload):
+    normalized = _normalize_input(payload)
+    options = normalized["options"]
+    changed_fields = set(payload.get("changed_fields") or [])
+    current = dict(payload.get("current_results") or {})
+
+    if not changed_fields:
+        return {}
+
+    context_fields = {
+        "local_time_str",
+        "timezone_str",
+        "latitude",
+        "longitude",
+        "latitude_str",
+        "longitude_str",
+        "elevation",
+        "atpress",
+        "attemp",
+        "calendar",
+    }
+
+    planetary_fields = {
+        "ecliptic_mode",
+        "ayanamsha_mode",
+        "node_mode",
+        "heliocentric",
+        "strict_ephe",
+        "selected_planets",
+        "selected_minor_planets",
+        "selected_stars",
+    }
+
+    house_fields = {
+        "house_system",
+        "KP_HORARY.is_active",
+        "KP_HORARY.mode",
+        "KP_HORARY.number",
+    }
+
+    sun_fields = {
+        "sunrise_rsmi",
+    }
+
+    dasha_fields = {
+        "dasha_days_in_year",
+    }
+
+    if changed_fields & context_fields:
+        return calculate_full_chart(payload)
+
+    context = _calculate_context(normalized)
+    updates = {}
+
+    if changed_fields == {"selected_minor_planets"}:
+        minor_planet_pos = calculate_minor_planets(
+            context,
+            options["selected_minor_planets"],
+            ecliptic_mode=options["ecliptic_mode"],
+            ayanamsha_mode=options["ayanamsha_mode"],
+            heliocentric=options["heliocentric"],
+            strict_ephe=options["strict_ephe"],
+        )
+        return safe_json(
+            {"minor_planet_pos": _format_point_map(minor_planet_pos)}
+        )
+
+    if changed_fields == {"selected_stars"}:
+        fixed_star_pos = calculate_fixed_stars(
+            context,
+            options["selected_stars"],
+            ecliptic_mode=options["ecliptic_mode"],
+            ayanamsha_mode=options["ayanamsha_mode"],
+            strict_ephe=options["strict_ephe"],
+        )
+        return safe_json(
+            {"fixed_star_pos": _format_point_map(fixed_star_pos)}
+        )
+
+    planet_pos = None
+    house_result = None
+    day_lord_result = None
+
+    if changed_fields & planetary_fields:
+        planet_pos, minor_planet_pos, fixed_star_pos = _calculate_planet_group(
+            context,
+            options,
+        )
+        updates["planet_pos"] = _format_point_map(planet_pos)
+        updates["minor_planet_pos"] = _format_point_map(minor_planet_pos)
+        updates["fixed_star_pos"] = _format_point_map(fixed_star_pos)
+
+        if changed_fields & {"ecliptic_mode", "ayanamsha_mode"}:
+            house_result = _calculate_house_group(context, options)
+            updates["house_result"] = {
+                **house_result,
+                "houses": _format_point_map(house_result["houses"]),
+                "axes": _format_point_map(house_result["axes"]),
+                "auxiliary_points": _format_point_map(
+                    house_result["auxiliary_points"]
+                ),
+            }
+
+        if changed_fields & {"ecliptic_mode", "ayanamsha_mode", "selected_planets"}:
+            updates["dasha_level1"] = _calculate_dasha(
+                context,
+                planet_pos,
+                options,
+            )
+
+    if changed_fields & house_fields:
+        if house_result is None:
+            house_result = _calculate_house_group(context, options)
+            updates["house_result"] = {
+                **house_result,
+                "houses": _format_point_map(house_result["houses"]),
+                "axes": _format_point_map(house_result["axes"]),
+                "auxiliary_points": _format_point_map(
+                    house_result["auxiliary_points"]
+                ),
+            }
+
+    if changed_fields & sun_fields:
+        sun_events, day_lord_result, planetary_hour_data = _calculate_sun_group(
+            context,
+            options,
+        )
+        updates["sun_events"] = sun_events
+        updates["day_lord_result"] = day_lord_result
+        updates["planetary_hour_data"] = planetary_hour_data
+
+    if changed_fields & dasha_fields:
+        if planet_pos is None:
+            planet_pos = current.get("planet_pos")
+            if not planet_pos:
+                planet_pos, _, _ = _calculate_planet_group(context, options)
+        updates["dasha_level1"] = _calculate_dasha(
+            context,
+            planet_pos,
+            options,
+        )
+
+    kp_needs_refresh = bool(
+        changed_fields & (planetary_fields | house_fields | sun_fields)
+    )
+
+    if kp_needs_refresh:
+        if planet_pos is None:
+            planet_pos = current.get("planet_pos")
+            if not planet_pos:
+                planet_pos, _, _ = _calculate_planet_group(context, options)
+
+        if house_result is None:
+            house_result = current.get("house_result")
+            if not house_result:
+                house_result = _calculate_house_group(context, options)
+
+        if day_lord_result is None:
+            day_lord_result = current.get("day_lord_result")
+            if not day_lord_result:
+                _, day_lord_result, _ = _calculate_sun_group(context, options)
+
+        updates.update(
+            _calculate_kp_group(
+                planet_pos,
+                house_result,
+                day_lord_result,
+            )
+        )
+
+    return safe_json(updates)
+
+
+########## FILE: quant_astro\core.py ##########
+"""可按依赖局部重算的占星底座。
+
+本模块只负责输入解析、Swiss Ephemeris 坐标/宫位计算，以及依赖时间的
+日出日落、值日星和行星时。KP 查表、象意逻辑，以及依赖 KP 查表反推
+上升点的卜卦入口 solve_horary_houses，统一放在 :mod:`kp` 里——
+本模块不反向 import kp，只保留单向依赖（kp 依赖 core，而非相反）。
+"""
+
+from __future__ import annotations
+
+import re
+import threading
+import warnings
+from dataclasses import asdict, dataclass
+from datetime import date, datetime, time, timedelta, timezone
+from importlib.resources import files
+from pathlib import Path
+from typing import Any, Iterable, Mapping, Sequence
+
+import swisseph as swe
+
+
+_SWISS_LOCK = threading.RLock()
+_ACTIVE_EPHE_PATH: str | None = None
+
+MAIN_PLANETS: dict[str, int] = {
+    "Su": swe.SUN,
+    "Mo": swe.MOON,
+    "Me": swe.MERCURY,
+    "Ve": swe.VENUS,
+    "Ma": swe.MARS,
+    "Ju": swe.JUPITER,
+    "Sa": swe.SATURN,
+    "Ur": swe.URANUS,
+    "Ne": swe.NEPTUNE,
+    "Pl": swe.PLUTO,
+}
+
+MINOR_PLANETS: dict[str, int] = {
+    "Ch": swe.CHIRON,
+    "Ph": swe.PHOLUS,
+    "Ce": swe.CERES,
+    "Pa": swe.PALLAS,
+    "Jn": swe.JUNO,
+    "Vs": swe.VESTA,
+}
+
+HOUSE_SYSTEMS: dict[str, bytes] = {
+    "Placidus": b"P",
+    "Koch": b"K",
+    "Regiomontanus": b"R",
+    "Whole Sign": b"W",
+    "Equal": b"E",
+    "Campanus": b"C",
+    "Alcabitius": b"B",
+    "Porphyry": b"O",
+    "Morinus": b"M",
+    "Topocentric": b"T",
+    "Vehlow": b"V",
+    "Meridian": b"X",
+    "Horizon": b"H",
+    "Krusinski": b"U",
+    "Carter": b"F",
+    "Equal/MC": b"D",
+    "Equal/Zodiac": b"N",
+    "APC": b"Y",
+    "Sunshine": b"I",
+    "Sunshine (Makransky)": b"i",
+    "Pullen SD": b"L",
+    "Pullen SR": b"Q",
+    "Sripati": b"S",
+}
+
+# datetime.weekday(): Monday == 0
+WEEKDAY_LORDS: dict[int, str] = {
+    0: "Mo",
+    1: "Ma",
+    2: "Me",
+    3: "Ju",
+    4: "Ve",
+    5: "Sa",
+    6: "Su",
+}
+CHALDEAN_ORDER: tuple[str, ...] = ("Sa", "Ju", "Ma", "Su", "Ve", "Me", "Mo")
+
+
+@dataclass(frozen=True)
+class AstroContext:
+    """一次计算共享的时间与地理底座。
+
+    ``local_dt`` 与 ``utc_dt`` 都是带时区的 datetime；``tz_offset`` 为小时数。
+    本地 Web 层需要 JSON 时可使用 :meth:`to_dict`。
+    """
+
+    jd_utc: float
+    lat: float
+    lon: float
+    eps: float
+    local_dt: datetime
+    utc_dt: datetime
+    tz_offset: float
+    elevation: float = 0.0
+    atpress: float = 1013.25
+    attemp: float = 10.0
+    calendar: str = "g"
+    ephe_path: str | None = None
+
+    def to_dict(self, *, json_safe: bool = True) -> dict[str, Any]:
+        result = asdict(self)
+        if json_safe:
+            result["local_dt"] = self.local_dt.isoformat()
+            result["utc_dt"] = self.utc_dt.isoformat()
+        return result
+
+
+def set_ephemeris_path(ephe_path: str | Path | None = None) -> str | None:
+    """设置并记住星历目录；未传路径时仅进行一次内置目录初始化。"""
+    global _ACTIVE_EPHE_PATH
+    with _SWISS_LOCK:
+        if ephe_path is not None:
+            if str(ephe_path) == "":
+                swe.set_ephe_path("")
+                _ACTIVE_EPHE_PATH = ""
+            else:
+                resolved = str(Path(ephe_path).expanduser().resolve())
+                swe.set_ephe_path(resolved)
+                _ACTIVE_EPHE_PATH = resolved
+        elif _ACTIVE_EPHE_PATH is None:
+            try:
+                package_name = (__package__ or "quant_astro").split(".")[0]
+                bundled = str(files(package_name).joinpath("ephe"))
+                if Path(bundled).is_dir():
+                    swe.set_ephe_path(bundled)
+                    _ACTIVE_EPHE_PATH = bundled
+            except (ModuleNotFoundError, FileNotFoundError, TypeError):
+                pass
+            if _ACTIVE_EPHE_PATH is None:
+                # 显式记录并恢复“无数据目录”状态，防止旧上下文意外沿用后来设置的路径。
+                swe.set_ephe_path("")
+                _ACTIVE_EPHE_PATH = ""
+    return _ACTIVE_EPHE_PATH
+
+
+def decimal_to_dms(value: float) -> dict[str, float | int | str]:
+    """将十进制度数转为结构化 DMS；负号保留在度数与字符串中。"""
+    sign = -1 if value < 0 else 1
+    absolute = abs(float(value))
+    total_centiseconds = round(absolute * 3600.0 * 100.0)
+    degrees, remainder = divmod(total_centiseconds, 3600 * 100)
+    minutes, centiseconds = divmod(remainder, 60 * 100)
+    seconds = centiseconds / 100.0
+    signed_degrees = degrees * sign
+    prefix = "-" if sign < 0 else ""
+    return {
+        "d": signed_degrees,
+        "m": minutes,
+        "s": seconds,
+        "str": f'{prefix}{degrees}°{minutes:02d}\'{seconds:05.2f}"',
+    }
+
+
+def _parse_timezone(value: str | float | int) -> float:
+    if isinstance(value, (int, float)):
+        offset = float(value)
+    else:
+        text = str(value).strip()
+        match = re.fullmatch(r"([+-]?)(\d{1,2})(?::(\d{1,2})|\.(\d+))?", text)
+        if not match:
+            raise ValueError(f"无法解析时区 {value!r}；支持 +8、-5:30、+5.5。")
+        sign = -1.0 if match.group(1) == "-" else 1.0
+        hours = float(match.group(2))
+        if match.group(3) is not None:
+            minutes = int(match.group(3))
+            if minutes >= 60:
+                raise ValueError("时区分钟必须小于 60。")
+            hours += minutes / 60.0
+        elif match.group(4) is not None:
+            hours = float(f"{match.group(2)}.{match.group(4)}")
+        offset = sign * hours
+    if not -14.0 <= offset <= 14.0:
+        raise ValueError("时区偏移必须在 -14 到 +14 小时之间。")
+    return offset
+
+
+def _parse_coordinate(value: str | float | int, *, latitude: bool) -> float:
+    if isinstance(value, (int, float)):
+        result = float(value)
+    else:
+        text = str(value).strip().upper()
+        parts = re.findall(r"\d+(?:\.\d+)?", text)
+        if not parts:
+            raise ValueError(f"无法解析坐标 {value!r}。")
+        degrees = float(parts[0])
+        minutes = float(parts[1]) if len(parts) > 1 else 0.0
+        seconds = float(parts[2]) if len(parts) > 2 else 0.0
+        if minutes >= 60 or seconds >= 60:
+            raise ValueError(f"坐标分、秒必须小于 60：{value!r}")
+        result = degrees + minutes / 60.0 + seconds / 3600.0
+        if "-" in text or any(mark in text for mark in ("S", "W", "南", "西")):
+            result = -result
+    limit = 90.0 if latitude else 180.0
+    if not -limit <= result <= limit:
+        kind = "纬度" if latitude else "经度"
+        raise ValueError(f"{kind}超出有效范围：{result}")
+    return result
+
+
+def _parse_civil_datetime(value: str | datetime, calendar: str) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value).strip().replace("T", " ")
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError(f"无法解析本地时间 {value!r}，请使用 YYYY-MM-DD HH:MM:SS[.ffffff]。") from exc
+    if parsed.tzinfo is not None:
+        raise ValueError("local_time_str 应是不带时区的当地钟表时间；时区请由 timezone_str 单独传入。")
+
+    cal = calendar.lower()
+    if cal not in {"g", "j"}:
+        raise ValueError("calendar 只能是 'g'（格里历）或 'j'（儒略历）。")
+    if cal == "g":
+        return parsed
+
+    hour = (
+        parsed.hour
+        + parsed.minute / 60.0
+        + parsed.second / 3600.0
+        + parsed.microsecond / 3_600_000_000.0
+    )
+    jd = swe.julday(parsed.year, parsed.month, parsed.day, hour, swe.JUL_CAL)
+    year, month, day_, hour_decimal = swe.revjul(jd, swe.GREG_CAL)
+    midnight = datetime(int(year), int(month), int(day_))
+    return midnight + timedelta(hours=hour_decimal)
+
+
+def _datetime_to_jd(dt_utc: datetime) -> float:
+    dt = dt_utc.astimezone(timezone.utc)
+    hour = dt.hour + dt.minute / 60.0 + dt.second / 3600.0 + dt.microsecond / 3_600_000_000.0
+    return swe.julday(dt.year, dt.month, dt.day, hour, swe.GREG_CAL)
+
+
+def _jd_to_local(jd_utc: float, tzinfo: timezone) -> datetime:
+    year, month, day_, hour_decimal = swe.revjul(jd_utc, swe.GREG_CAL)
+    dt_utc = datetime(int(year), int(month), int(day_), tzinfo=timezone.utc) + timedelta(hours=hour_decimal)
+    return dt_utc.astimezone(tzinfo)
+
+
+def parse_time_geo(
+    local_time_str: str | datetime,
+    timezone_str: str | float,
+    latitude_str: str | float,
+    longitude_str: str | float,
+    *,
+    calendar: str = "g",
+    elevation: float = 0.0,
+    atpress: float = 1013.25,
+    attemp: float = 10.0,
+    ephe_path: str | Path | None = None,
+) -> AstroContext:
+    """解析时间与地理输入，返回所有后续函数共享的不可变上下文。"""
+    tz_offset = _parse_timezone(timezone_str)
+    tzinfo = timezone(timedelta(hours=tz_offset))
+    civil_dt = _parse_civil_datetime(local_time_str, calendar)
+    local_dt = civil_dt.replace(tzinfo=tzinfo)
+    utc_dt = local_dt.astimezone(timezone.utc)
+    jd_utc = _datetime_to_jd(utc_dt)
+    lat = _parse_coordinate(latitude_str, latitude=True)
+    lon = _parse_coordinate(longitude_str, latitude=False)
+    with _SWISS_LOCK:
+        active_path = set_ephemeris_path(ephe_path)
+        eps = float(swe.calc_ut(jd_utc, swe.ECL_NUT, 0)[0][0])
+    return AstroContext(
+        jd_utc=jd_utc,
+        lat=lat,
+        lon=lon,
+        eps=eps,
+        local_dt=local_dt,
+        utc_dt=utc_dt,
+        tz_offset=tz_offset,
+        elevation=float(elevation),
+        atpress=float(atpress),
+        attemp=float(attemp),
+        calendar=calendar.lower(),
+        ephe_path=active_path,
+    )
+
+
+def _resolve_ayanamsha(value: str | int) -> int:
+    if isinstance(value, int):
+        return value
+    clean = str(value).replace("swe.", "").strip().upper()
+    candidates = (clean, f"SE_{clean}", clean.replace("SIDM_", "SE_SIDM_"))
+    for name in candidates:
+        if hasattr(swe, name):
+            return int(getattr(swe, name))
+    raise ValueError(f"找不到岁差模式：{value!r}")
+
+
+def _position_flags(ecliptic_mode: str, ayanamsha_mode: str | int, heliocentric: bool) -> int:
+    mode = ecliptic_mode.lower()
+    if mode not in {"tropical", "sidereal"}:
+        raise ValueError("ecliptic_mode 只能是 'tropical' 或 'sidereal'。")
+    flags = swe.FLG_SWIEPH | swe.FLG_SPEED
+    if mode == "sidereal":
+        swe.set_sid_mode(_resolve_ayanamsha(ayanamsha_mode))
+        flags |= swe.FLG_SIDEREAL
+    if heliocentric:
+        flags |= swe.FLG_HELCTR
+    return flags
+
+
+def _check_ephemeris_result(
+    ret_flag: int | None,
+    requested_flags: int,
+    label: str,
+    strict: bool,
+    serr: str = "",
+) -> None:
+    if ret_flag is None or not (requested_flags & swe.FLG_SWIEPH):
+        return
+    # FLG_MOSEPH 是 pysweph/pyswisseph 的标准常量，不用 getattr(..., 0) 兜底——
+    # 那样万一它哪天真的取不到，会让这个 strict_ephe=True 的安全检查悄悄失效
+    # 而不是报错提醒我们，反而更危险。
+    used_moshier = bool(swe.FLG_MOSEPH & ret_flag)
+    missing_swiss = not bool(ret_flag & swe.FLG_SWIEPH)
+    if not (used_moshier or missing_swiss):
+        return
+    # pysweph >= 2.10.3.3 起，calc()/calc_ut() 等函数会在返回值里多带一条
+    # serr 字符串，通常直接写明具体缺了哪个星历文件，比我们自己拼的提示更准确。
+    detail = f"；Swiss Ephemeris 提示：{serr}" if serr else ""
+    message = (
+        f"{label} 未使用 Swiss Ephemeris 高精度文件，已回退到 Moshier；"
+        f"当前星历目录：{_ACTIVE_EPHE_PATH!r}{detail}。"
+    )
+    if strict:
+        raise FileNotFoundError(message)
+    warnings.warn(message, RuntimeWarning, stacklevel=3)
+
+
+def _calc_body(jd_utc: float, body_id: int, flags: int, label: str, strict_ephe: bool) -> dict[str, float]:
+    ecliptic_result = swe.calc_ut(jd_utc, body_id, flags)
+    equatorial_result = swe.calc_ut(jd_utc, body_id, flags | swe.FLG_EQUATORIAL)
+    xx = ecliptic_result[0]
+    eq = equatorial_result[0]
+    ret_flag = ecliptic_result[1] if len(ecliptic_result) > 1 and isinstance(ecliptic_result[1], int) else None
+    # pysweph >= 2.10.3.3 的 calc_ut() 返回 (xx, retflags, serr) 三元组；
+    # 旧版 pyswisseph 只有二元组，len(...) > 2 的判断让两种版本都能正常工作。
+    serr = ecliptic_result[2] if len(ecliptic_result) > 2 and isinstance(ecliptic_result[2], str) else ""
+    _check_ephemeris_result(ret_flag, flags, label, strict_ephe, serr=serr)
+    return {
+        "lon": float(xx[0] % 360.0),
+        "lat": float(xx[1]),
+        "speed": float(xx[3]),
+        "ra": float(eq[0] % 360.0),
+        "dec": float(eq[1]),
+    }
+
+
+def calculate_planets(
+    context: AstroContext,
+    selected_planets: Sequence[str] | None = None,
+    *,
+    ecliptic_mode: str = "sidereal",
+    ayanamsha_mode: str | int = "SIDM_KRISHNAMURTI",
+    node_mode: str = "mean",
+    heliocentric: bool = False,
+    strict_ephe: bool = True,
+    ephe_path: str | Path | None = None,
+) -> dict[str, dict[str, float]]:
+    """仅计算主行星及交点的黄经、纬度、速度、赤经和赤纬。"""
+    effective_ephe_path = ephe_path if ephe_path is not None else context.ephe_path
+    requested = list(MAIN_PLANETS) + ["Ra", "Ke"] if selected_planets is None or "All" in selected_planets else list(selected_planets)
+    unknown = set(requested) - set(MAIN_PLANETS) - {"Ra", "Ke"}
+    if unknown:
+        raise ValueError(f"未知主行星代码：{sorted(unknown)}")
+    node_mode = node_mode.lower()
+    if node_mode not in {"mean", "true"}:
+        raise ValueError("node_mode 只能是 'mean' 或 'true'。")
+
+    result: dict[str, dict[str, float]] = {}
+    with _SWISS_LOCK:
+        set_ephemeris_path(effective_ephe_path)
+        base_flags = _position_flags(ecliptic_mode, ayanamsha_mode, heliocentric)
+        for name in requested:
+            if name in {"Ra", "Ke"} or name in result:
+                continue
+            result[name] = _calc_body(context.jd_utc, MAIN_PLANETS[name], base_flags, name, strict_ephe)
+
+        if "Ra" in requested or "Ke" in requested:
+            node_id = swe.TRUE_NODE if node_mode == "true" else swe.MEAN_NODE
+            # 月交点是地心定义；即使其余天体使用日心，也不把 HELCTR 施加到交点。
+            node_flags = base_flags & ~swe.FLG_HELCTR
+            north = _calc_body(context.jd_utc, node_id, node_flags, "Ra/Ke", strict_ephe)
+            if "Ra" in requested:
+                result["Ra"] = north
+            if "Ke" in requested:
+                # 南交点是北交点在天球上的严格反点；直接反转赤道坐标，
+                # 避免把恒星黄经误当作热带黄经交给 cotrans。
+                result["Ke"] = {
+                    "lon": (north["lon"] + 180.0) % 360.0,
+                    "lat": -north["lat"],
+                    "speed": north["speed"],
+                    "ra": (north["ra"] + 180.0) % 360.0,
+                    "dec": -north["dec"],
+                }
+    return {name: result[name] for name in requested if name in result}
+
+
+def calculate_minor_planets(
+    context: AstroContext,
+    selected_minor_planets: Sequence[str] | None = None,
+    *,
+    ecliptic_mode: str = "sidereal",
+    ayanamsha_mode: str | int = "SIDM_KRISHNAMURTI",
+    heliocentric: bool = False,
+    strict_ephe: bool = True,
+    ephe_path: str | Path | None = None,
+) -> dict[str, dict[str, float]]:
+    """仅计算指定小行星的黄经、纬度、速度、赤经和赤纬。"""
+    effective_ephe_path = ephe_path if ephe_path is not None else context.ephe_path
+    requested = list(selected_minor_planets or ())
+    unknown = set(requested) - set(MINOR_PLANETS)
+    if unknown:
+        raise ValueError(f"未知小行星代码：{sorted(unknown)}；可用值：{sorted(MINOR_PLANETS)}")
+    result: dict[str, dict[str, float]] = {}
+    with _SWISS_LOCK:
+        set_ephemeris_path(effective_ephe_path)
+        flags = _position_flags(ecliptic_mode, ayanamsha_mode, heliocentric)
+        for name in requested:
+            result[name] = _calc_body(context.jd_utc, MINOR_PLANETS[name], flags, name, strict_ephe)
+    return result
+
+
+def calculate_fixed_stars(
+    context_or_jd: AstroContext | float,
+    selected_stars: Iterable[str],
+    *,
+    ecliptic_mode: str = "tropical",
+    ayanamsha_mode: str | int = "SIDM_KRISHNAMURTI",
+    strict_ephe: bool = True,
+    skip_errors: bool = False,
+    ephe_path: str | Path | None = None,
+) -> dict[str, dict[str, float]]:
+    """仅计算恒星的黄经、纬度、速度、赤经和赤纬。"""
+    context_path = context_or_jd.ephe_path if isinstance(context_or_jd, AstroContext) else None
+    effective_ephe_path = ephe_path if ephe_path is not None else context_path
+    jd_utc = context_or_jd.jd_utc if isinstance(context_or_jd, AstroContext) else float(context_or_jd)
+    result: dict[str, dict[str, float]] = {}
+    with _SWISS_LOCK:
+        set_ephemeris_path(effective_ephe_path)
+        flags = _position_flags(ecliptic_mode, ayanamsha_mode, False)
+        for star_name in selected_stars:
+            try:
+                ecliptic_result = swe.fixstar2_ut(star_name, jd_utc, flags)
+                equatorial_result = swe.fixstar2_ut(star_name, jd_utc, flags | swe.FLG_EQUATORIAL)
+                xx, eq = ecliptic_result[0], equatorial_result[0]
+                ret_flag = ecliptic_result[2] if len(ecliptic_result) > 2 else None
+                _check_ephemeris_result(ret_flag, flags, f"恒星 {star_name}", strict_ephe)
+                result[star_name] = {
+                    "lon": float(xx[0] % 360.0),
+                    "lat": float(xx[1]),
+                    "speed": float(xx[3]),
+                    "ra": float(eq[0] % 360.0),
+                    "dec": float(eq[1]),
+                }
+            except Exception as exc:
+                if not skip_errors:
+                    raise ValueError(f"恒星 {star_name!r} 计算失败：{exc}") from exc
+    return result
+
+
+def _extract_12(values: Sequence[float]) -> list[float]:
+    if len(values) >= 13:
+        return [float(value) for value in values[1:13]]
+    if len(values) == 12:
+        return [float(value) for value in values]
+    raise RuntimeError(f"宫位函数返回了非预期长度：{len(values)}")
+
+
+def _house_flags(ecliptic_mode: str, ayanamsha_mode: str | int) -> int:
+    mode = ecliptic_mode.lower()
+    if mode == "sidereal":
+        swe.set_sid_mode(_resolve_ayanamsha(ayanamsha_mode))
+        return swe.FLG_SIDEREAL
+    if mode == "tropical":
+        return 0
+    raise ValueError("ecliptic_mode 只能是 'tropical' 或 'sidereal'。")
+
+
+def _ecliptic_point(
+    longitude: float,
+    speed: float,
+    eps: float,
+    ayanamsha: float,
+) -> dict[str, float]:
+    """把宫头/轴点统一转换为与行星相同的坐标结构。"""
+    longitude %= 360.0
+    # houses_ex2 的恒星黄经先加回同一时刻、同一 flags 的岁差值，
+    # 再转换为物理上对应点的赤经赤纬。
+    tropical_longitude = (longitude + ayanamsha) % 360.0
+    equatorial = swe.cotrans((tropical_longitude, 0.0, 1.0), -eps)
+    return {
+        "lon": longitude,
+        "lat": 0.0,
+        "speed": float(speed),
+        "ra": float(equatorial[0] % 360.0),
+        "dec": float(equatorial[1]),
+    }
+
+
+def calculate_houses(
+    context: AstroContext,
+    house_system: str = "Placidus",
+    *,
+    ecliptic_mode: str = "sidereal",
+    ayanamsha_mode: str | int = "SIDM_KRISHNAMURTI",
+    jd_utc: float | None = None,
+    ephe_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """独立计算 12 宫头、四轴和 Swiss Ephemeris 辅助轴点。
+
+    返回结构：
+        ``houses``: ``house 1`` 至 ``house 12``；
+        ``axes``: Asc / Desc / MC / IC 四轴；
+        ``auxiliary_points``: ARMC、Vertex 及 Swiss Ephemeris 其余轴点。
+
+    Whole Sign、Equal 等宫位制下，MC 不一定等于第 10 宫宫头，因此四轴
+    必须直接取 ``ascmc``，不能从宫头推断。
+    """
+    if house_system == "Gauquelin":
+        raise ValueError("Gauquelin 返回 36 个 sector，不属于 12 宫接口。")
+    if house_system not in HOUSE_SYSTEMS:
+        raise ValueError(f"未知宫位制 {house_system!r}；可用值：{sorted(HOUSE_SYSTEMS)}")
+
+    target_jd = context.jd_utc if jd_utc is None else float(jd_utc)
+    effective_ephe_path = ephe_path if ephe_path is not None else context.ephe_path
+    with _SWISS_LOCK:
+        # 宫位是可被单独局部刷新的公开入口，因此必须自行恢复星历路径和岁差状态。
+        set_ephemeris_path(effective_ephe_path)
+        flags = _house_flags(ecliptic_mode, ayanamsha_mode)
+        raw = swe.houses_ex2(
+            target_jd,
+            context.lat,
+            context.lon,
+            HOUSE_SYSTEMS[house_system],
+            flags=flags,
+        )
+        cusps = _extract_12(raw[0])
+        ascmc = [float(value) for value in raw[1]]
+        cusp_speeds = _extract_12(raw[2])
+        ascmc_speeds = [float(value) for value in raw[3]]
+        target_eps = float(swe.calc_ut(target_jd, swe.ECL_NUT, 0)[0][0])
+        ayanamsha = (
+            float(swe.get_ayanamsa_ex_ut(target_jd, flags)[1])
+            if ecliptic_mode.lower() == "sidereal"
+            else 0.0
+        )
+
+        houses = {
+            f"house {index}": _ecliptic_point(longitude, speed, target_eps, ayanamsha)
+            for index, (longitude, speed) in enumerate(zip(cusps, cusp_speeds), start=1)
+        }
+
+        asc = _ecliptic_point(ascmc[0], ascmc_speeds[0], target_eps, ayanamsha)
+        mc = _ecliptic_point(ascmc[1], ascmc_speeds[1], target_eps, ayanamsha)
+        desc = _ecliptic_point(
+            (ascmc[0] + 180.0) % 360.0,
+            ascmc_speeds[0],
+            target_eps,
+            ayanamsha,
+        )
+        ic = _ecliptic_point(
+            (ascmc[1] + 180.0) % 360.0,
+            ascmc_speeds[1],
+            target_eps,
+            ayanamsha,
+        )
+        axes = {"Asc": asc, "Desc": desc, "MC": mc, "IC": ic}
+
+        auxiliary_points = {
+            # ARMC 是赤道坐标角，不是黄经，故不伪装成 lon/ra/dec 坐标结构。
+            "ARMC": {"angle": ascmc[2] % 360.0, "speed": ascmc_speeds[2]},
+            "Vertex": _ecliptic_point(ascmc[3], ascmc_speeds[3], target_eps, ayanamsha),
+            "Equatorial Ascendant": _ecliptic_point(
+                ascmc[4], ascmc_speeds[4], target_eps, ayanamsha
+            ),
+            "Co-Ascendant (Koch)": _ecliptic_point(
+                ascmc[5], ascmc_speeds[5], target_eps, ayanamsha
+            ),
+            "Co-Ascendant (Munkasey)": _ecliptic_point(
+                ascmc[6], ascmc_speeds[6], target_eps, ayanamsha
+            ),
+            "Polar Ascendant": _ecliptic_point(
+                ascmc[7], ascmc_speeds[7], target_eps, ayanamsha
+            ),
+        }
+
+    return {
+        "house_system": house_system,
+        "ecliptic_mode": ecliptic_mode.lower(),
+        "jd_utc": target_jd,
+        "houses": houses,
+        "axes": axes,
+        "auxiliary_points": auxiliary_points,
+    }
+
+
+def _coerce_date(value: date | datetime | str | None, default: date) -> date:
+    if value is None:
+        return default
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
+
+
+def _sun_event(
+    context: AstroContext,
+    target_date: date,
+    event_flag: int,
+    style_flags: int,
+) -> tuple[float, datetime]:
+    local_midnight = datetime.combine(target_date, time.min, tzinfo=context.local_dt.tzinfo)
+    jd_start = _datetime_to_jd(local_midnight.astimezone(timezone.utc))
+    result_flag, event_times = swe.rise_trans(
+        jd_start,
+        swe.SUN,
+        event_flag | style_flags,
+        (context.lon, context.lat, context.elevation),
+        context.atpress,
+        context.attemp,
+        swe.FLG_SWIEPH,
+    )
+    event_jd = float(event_times[0])
+    if result_flag < 0 or event_jd <= 1.0:
+        event_name = "日出" if event_flag == swe.CALC_RISE else "日落"
+        raise ValueError(f"{target_date} 无法计算{event_name}（可能处于极昼/极夜区域）。")
+    return event_jd, _jd_to_local(event_jd, context.local_dt.tzinfo)
+
+
+def calculate_sunrise_sunset(
+    context: AstroContext,
+    target_date: date | datetime | str | None = None,
+    *,
+    rsmi: int | None = None,
+    ephe_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """统一、精确计算指定当地日期的日出和日落。"""
+    effective_ephe_path = ephe_path if ephe_path is not None else context.ephe_path
+    local_date = _coerce_date(target_date, context.local_dt.date())
+    user_flags = swe.BIT_DISC_CENTER if rsmi is None else int(rsmi)
+    style_flags = user_flags & ~(swe.CALC_RISE | swe.CALC_SET)
+    with _SWISS_LOCK:
+        set_ephemeris_path(effective_ephe_path)
+        rise_jd, sunrise = _sun_event(context, local_date, swe.CALC_RISE, style_flags)
+        set_jd, sunset = _sun_event(context, local_date, swe.CALC_SET, style_flags)
+    if sunrise.date() != local_date or sunset.date() != local_date:
+        raise ValueError(
+            f"{local_date} 当地并非同时存在日出和日落（可能处于极昼/极夜过渡期）；"
+            "不会用相邻日期事件冒充当天事件。"
+        )
+    return {
+        "date": local_date.isoformat(),
+        "sunrise_local": sunrise,
+        "sunset_local": sunset,
+        "sunrise_jd_utc": rise_jd,
+        "sunset_jd_utc": set_jd,
+    }
+
+
+def calculate_day_lord(
+    context: AstroContext,
+    sun_events: Mapping[str, Any] | None = None,
+    *,
+    rsmi: int | None = None,
+) -> dict[str, Any]:
+    """按“日出换日”规则计算迦勒底值日星。"""
+    events = dict(sun_events) if sun_events is not None else calculate_sunrise_sunset(context, rsmi=rsmi)
+    sunrise = events["sunrise_local"]
+    if isinstance(sunrise, str):
+        sunrise = datetime.fromisoformat(sunrise)
+    before_sunrise = context.local_dt < sunrise
+    astrological_date = context.local_dt.date() - timedelta(days=1 if before_sunrise else 0)
+    return {
+        "day_lord": WEEKDAY_LORDS[astrological_date.weekday()],
+        "astrological_date": astrological_date.isoformat(),
+        "is_before_sunrise": before_sunrise,
+        "sunrise_local": sunrise,
+    }
+
+
+def calculate_planetary_hour(
+    context: AstroContext,
+    *,
+    rsmi: int | None = None,
+    ephe_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """按昼、夜各十二等分计算当前行星时。"""
+    effective_ephe_path = ephe_path if ephe_path is not None else context.ephe_path
+    today = calculate_sunrise_sunset(context, rsmi=rsmi, ephe_path=effective_ephe_path)
+    sunrise_today = today["sunrise_local"]
+    sunset_today = today["sunset_local"]
+
+    if context.local_dt < sunrise_today:
+        previous = calculate_sunrise_sunset(
+            context, context.local_dt.date() - timedelta(days=1), rsmi=rsmi, ephe_path=effective_ephe_path
+        )
+        period_start, period_end = previous["sunset_local"], sunrise_today
+        astrological_date = context.local_dt.date() - timedelta(days=1)
+        daytime = False
+        base_offset = 12
+    elif context.local_dt >= sunset_today:
+        following = calculate_sunrise_sunset(
+            context, context.local_dt.date() + timedelta(days=1), rsmi=rsmi, ephe_path=effective_ephe_path
+        )
+        period_start, period_end = sunset_today, following["sunrise_local"]
+        astrological_date = context.local_dt.date()
+        daytime = False
+        base_offset = 12
+    else:
+        period_start, period_end = sunrise_today, sunset_today
+        astrological_date = context.local_dt.date()
+        daytime = True
+        base_offset = 0
+
+    hour_seconds = (period_end - period_start).total_seconds() / 12.0
+    elapsed = max(0.0, (context.local_dt - period_start).total_seconds())
+    period_index = min(11, int(elapsed / hour_seconds))
+    hour_number = base_offset + period_index + 1
+    day_lord = WEEKDAY_LORDS[astrological_date.weekday()]
+    lord_index = CHALDEAN_ORDER.index(day_lord)
+    planetary_lord = CHALDEAN_ORDER[(lord_index + hour_number - 1) % 7]
+    hour_start = period_start + timedelta(seconds=period_index * hour_seconds)
+    hour_end = period_start + timedelta(seconds=(period_index + 1) * hour_seconds)
+
+    return {
+        "planetary_hour_lord": planetary_lord,
+        "day_lord": day_lord,
+        "astrological_date": astrological_date.isoformat(),
+        "is_day_time": daytime,
+        "hour_number": hour_number,
+        "period_hour": period_index + 1,
+        "hour_start": hour_start,
+        "hour_end": hour_end,
+        "hour_length_seconds": hour_seconds,
+    }
+
+
+########## FILE: quant_astro\dasha_Vimshottari.py ##########
+# quant_astro/dasha_Vimshottari.py
+"""Vimshottari 大运（Dasha）计算——懒加载模型。
+
+本文件合并了原来的 dasha_Vimshottari.py + dasha_Vimshottari_api.py，并针对
+"本地 Flask 后端 + HTML 前端"的未来架构做了彻底重构，核心设计如下：
+
+- 整棵大运树只有一个自相似的细分元语 `divide_dasha_interval()`：把一段
+  `DashaInterval` 按 Vimshottari 固定比例切成后续 9 段，从其自身所在行星
+  开始按九星固定顺序循环。第一层（Mahadasha）只是对一个"虚拟根区间"
+  （行星 = 命主星宿主星，时长 = 120 年整周期）调用一次这个元语的结果；
+  点击展开下一层，只是对被点击的那个区间再调用一次同一个元语——
+  没有第二套逻辑，也不存在"树只能算到第几层"的上限。
+
+- 这个元语本身是纯函数：不读文件、不依赖出生数据、不知道自己在树的
+  第几层。只有算"根区间"这一步需要出生数据、星宿表和 days_in_year。
+  这让未来的 Flask `/dasha/expand` 路由可以完全无状态——只需要被点击
+  区间自带的 (行星, 起点, 时长) 三元组，不需要重新查一遍星宿表，也不
+  需要知道任何出生数据。
+
+- 不再自己解析 birth_time_str / timezone_str / calendar——直接吃
+  `core.parse_time_geo()` 已经算好的 `AstroContext`（`context.local_dt`
+  已经是带时区、且已按 calendar 转换成格里历的 datetime），避免和
+  core.py 里的时区/历法解析逻辑产生第二套实现（本次重构不改动 core.py
+  和 kp.py 本身）。
+
+- 全程用 Decimal 承载时长/秒数，不经过 `timedelta.total_seconds()`
+  （返回 float）这样的往返转换，也不用近似小数常量表示 13°20′——
+  这两点都是原代码里真实存在、会悄悄吃掉精度的地方，这次一并修掉。
+  已经用一份合成的星宿表跑过多组边界回归测试（含 Revati 跨 360°/0°），
+  与原算法的行星序列和起止时刻完全对得上（误差仅为原代码自身 float
+  转换带来的 1 微秒噪声）。
+
+- 不再提供整表 CSV 导出 / Colab 下载（原 create_dasha_table 的这部分
+  职责）。如果以后又需要"一次性导出到第 N 层"的能力，在
+  `divide_dasha_interval` 之上做一个简单的广度优先迭代包装即可，
+  不需要另起一套算法。
+"""
+
+from __future__ import annotations
+
+import csv
+import os
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from decimal import Decimal, localcontext
+from functools import lru_cache, wraps
+from importlib.resources import files
+from pathlib import Path
+from typing import Any
+
+from .core import AstroContext
+
+# ---------------------------------------------------------------------------
+# 常量：九星固定周期与顺序（Vimshottari 120 年整周期）
+# ---------------------------------------------------------------------------
+
+#: 九星的固定循环顺序（钦定不变）。
+PLANET_ORDER: tuple[str, ...] = ("Ke", "Ve", "Su", "Mo", "Ma", "Ra", "Ju", "Sa", "Me")
+
+#: 每颗星在完整 120 年周期中分得的年数。
+PLANET_YEARS: dict[str, int] = {
+    "Ke": 7, "Ve": 20, "Su": 6, "Mo": 10, "Ma": 7,
+    "Ra": 18, "Ju": 16, "Sa": 19, "Me": 17,
+}
+
+# 由 PLANET_ORDER 派生，避免像原代码那样把"年数"和"下一颗星"分别写在
+# 两处、容易改一处忘改另一处。
+_NEXT_PLANET: dict[str, str] = {
+    planet: PLANET_ORDER[(index + 1) % len(PLANET_ORDER)]
+    for index, planet in enumerate(PLANET_ORDER)
+}
+
+TOTAL_CYCLE_YEARS: int = sum(PLANET_YEARS.values())
+assert TOTAL_CYCLE_YEARS == 120, "九星年数之和必须等于120年整周期"
+
+# 13°20′ = 40/3 度，是每个星宿的固定跨度。原代码用 Decimal('13.333333333333334')
+# 这样一个截断的十进制近似值去做除法；13°20′其实是精确的有理数 40/3，
+# "除以 40/3"等价于"乘以 3/40"——用这个精确分数运算，彻底避免近似小数
+# 带来的舍入误差（虽然实际量级很小，但既然要求不丢精度，就顺手修掉）。
+_NAKSHATRA_SPAN_NUMERATOR = Decimal(3)
+_NAKSHATRA_SPAN_DENOMINATOR = Decimal(40)
+
+
+# ---------------------------------------------------------------------------
+# 精度保护：确保 Decimal 运算有足够精度，且不污染全局 Decimal 上下文
+# ---------------------------------------------------------------------------
+
+def _decimal_precision(func):
+    """让被装饰函数在执行期间使用 28 位有效数字（Python decimal 模块的默认
+    精度，足够覆盖本模块所有秒数/时长运算），且不依赖调用方或本进程其余
+    代码是否改过全局精度设置，也不会反过来影响它们——用 `localcontext()`
+    临时切换，函数返回后自动还原。比原代码在函数体内直接
+    `getcontext().prec = 20`（全局、持久生效）更安全。
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        with localcontext() as ctx:
+            ctx.prec = 28
+            return func(*args, **kwargs)
+    return wrapper
+
+
+def _decimal_seconds_to_timedelta(seconds: Decimal) -> timedelta:
+    """把任意精度的秒数(Decimal)精确拆分成天/秒/微秒再构造 timedelta，
+    全程不经过 float——这是本模块构造 timedelta 的唯一入口，避免出现
+    像原代码 `timedelta(seconds=float(x))` 那样，在时间跨度较大时把
+    Decimal 的精度在这一步悄悄丢给 float 舍入。
+    """
+    with localcontext() as ctx:
+        ctx.prec = 28
+        days, remainder = divmod(seconds, Decimal(86400))
+        whole_seconds = int(remainder)
+        microseconds = int((remainder - whole_seconds) * Decimal(1_000_000))
+        return timedelta(days=int(days), seconds=whole_seconds, microseconds=microseconds)
+
+
+# ---------------------------------------------------------------------------
+# 星宿表：加载一次、进程内缓存，约定与 kp.py 的 _default_table_path 一致
+# ---------------------------------------------------------------------------
+
+def _default_star_table_path() -> Path:
+    """解析 data/star.csv 的路径。查找顺序与 kp.py 里
+    `_default_table_path` 完全一致：环境变量 -> 本地开发目录 -> 已安装包
+    的资源目录，方便两个模块的行为保持一致、也方便同样支持环境变量覆盖。
+    """
+    env_path = os.getenv("QUANT_ASTRO_STAR_TABLE")
+    if env_path:
+        return Path(env_path).expanduser().resolve()
+
+    local = Path(__file__).resolve().parent / "data" / "star.csv"
+    if local.exists():
+        return local
+
+    package_names = [name for name in (__package__, "quant_astro") if name]
+    for package_name in package_names:
+        try:
+            candidate = Path(str(files(package_name).joinpath("data/star.csv")))
+            if candidate.exists():
+                return candidate
+        except (ModuleNotFoundError, TypeError):
+            continue
+    raise FileNotFoundError(
+        "找不到 data/star.csv。请保留原 quant_astro/data 目录，"
+        "或设置环境变量 QUANT_ASTRO_STAR_TABLE 指向该文件。"
+    )
+
+
+@lru_cache(maxsize=8)
+def _load_star_table_cached(path_text: str) -> tuple[dict[str, Any], ...]:
+    """读取并解析星宿表；同一路径在整个进程生命周期内只读取、只解析一次
+    ——原代码每次调用都重新打开一遍 CSV，在"点一下就发一次请求"的 Flask
+    场景下是纯粹的浪费。
+
+    'To' 为 0 的行（表示这个星宿跨越 360°/0° 边界，即 Revati）在加载时就
+    近归一化成 360，后面查表就不再需要为它单独写一个"跨界"的判断分支
+    ——这个手法和 kp.py 里处理 sub-sub 表的方式完全一致。
+    """
+    rows: list[dict[str, Any]] = []
+    with Path(path_text).open("r", encoding="utf-8-sig", newline="") as handle:
+        for source in csv.DictReader(handle):
+            from_deg = Decimal(source["From"].strip())
+            to_raw = Decimal(source["To"].strip())
+            to_deg = Decimal(360) if to_raw == 0 else to_raw
+            rows.append({
+                "from": from_deg,
+                "to": to_deg,
+                "star_lord": source["Star-Lord"].strip(),
+            })
+    if not rows:
+        raise ValueError(f"星宿表为空：{path_text}")
+    return tuple(rows)
+
+
+@_decimal_precision
+def _locate_nakshatra(moon_lon: float, *, table_path: str | Path | None = None) -> tuple[Decimal, str]:
+    """定位月亮黄经所在星宿，返回 (该星宿内已走过的角度所占比例[0,1), 星宿主星)。
+
+    这一步只关心几何位置，完全不涉及 days_in_year 或秒数换算——那是
+    调用方 `_compute_dasha_root` 的事，原代码把两件事揉在一个函数里，
+    这里拆开让每个函数只做一件事。
+    """
+    path = Path(table_path).expanduser().resolve() if table_path else _default_star_table_path()
+    rows = _load_star_table_cached(str(path))
+    lon = Decimal(str(moon_lon)) % Decimal(360)
+    for row in rows:
+        if row["from"] <= lon < row["to"]:
+            elapsed_degrees = lon - row["from"]
+            elapsed_fraction = (elapsed_degrees * _NAKSHATRA_SPAN_NUMERATOR) / _NAKSHATRA_SPAN_DENOMINATOR
+            return elapsed_fraction, row["star_lord"]
+    raise LookupError(f"星宿表中没有覆盖黄经 {lon}° 的区间。")
+
+
+# ---------------------------------------------------------------------------
+# 数据结构：一个大运区间
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class DashaInterval:
+    """一个大运区间。``duration_seconds`` 全程用 Decimal 承载，不依赖从
+    start/end 反推（那样会经过 `timedelta.total_seconds()` 变成 float，
+    见模块顶部说明）。
+
+    这是本模块唯一的"节点"表示：无论是第一层的 Mahadasha，还是往下展开
+    任意一层，都是同一种对象、同一个字段集合——不像原代码用
+    `"L2 Ju"` 这种格式化字符串编码层级和行星，还要在别处再拆解读回来。
+    """
+
+    planet: str
+    start: datetime  # tz-aware
+    duration_seconds: Decimal
+
+    def __post_init__(self) -> None:
+        if self.planet not in PLANET_YEARS:
+            raise ValueError(f"未知行星代码：{self.planet!r}")
+        if self.duration_seconds <= 0:
+            raise ValueError("duration_seconds 必须为正数。")
+
+    @property
+    def end(self) -> datetime:
+        return self.start + _decimal_seconds_to_timedelta(self.duration_seconds)
+
+    def to_dict(self, *, json_safe: bool = True) -> dict[str, Any]:
+        """供 Flask 层直接序列化成 JSON；``duration_seconds`` 特意保留成
+        十进制字符串而不是 float，前端展开下一层时把这个字符串原样传回来
+        （见 `expand_dasha_interval`），全程不经过一次 float 转换。
+        """
+        return {
+            "planet": self.planet,
+            "start": self.start.isoformat() if json_safe else self.start,
+            "end": self.end.isoformat() if json_safe else self.end,
+            "duration_seconds": (
+                str(self.duration_seconds) if json_safe else self.duration_seconds
+            ),
+        }
+
+
+# ---------------------------------------------------------------------------
+# 核心元语：把一个区间细分为后续 9 个子运（零依赖，纯函数）
+# ---------------------------------------------------------------------------
+
+@_decimal_precision
+def divide_dasha_interval(parent: DashaInterval) -> list[DashaInterval]:
+    """把 ``parent`` 按 Vimshottari 固定比例切成后续 9 段子运。
+
+    序列从 ``parent.planet`` 自身开始，按九星固定顺序循环；每段时长 =
+    ``parent.duration_seconds`` 按该行星年数 / 120 的比例分配，逐段首尾
+    相接。
+
+    这是整个模块唯一的分层算法：第一层（对虚拟根区间调用一次，见
+    `_compute_dasha_root`）和更深的每一层（对被点击的区间再调用一次）
+    共用这同一个函数、同一次调用——不做任何"提前算好第 N 层"的递归预算，
+    调用方想展开多少层，就调用多少次本函数。
+    """
+    children: list[DashaInterval] = []
+    current_planet = parent.planet
+    current_start = parent.start
+    for _ in range(len(PLANET_ORDER)):
+        share = (parent.duration_seconds * PLANET_YEARS[current_planet]) / TOTAL_CYCLE_YEARS
+        children.append(
+            DashaInterval(planet=current_planet, start=current_start, duration_seconds=share)
+        )
+        current_start = current_start + _decimal_seconds_to_timedelta(share)
+        current_planet = _NEXT_PLANET[current_planet]
+    return children
+
+
+# ---------------------------------------------------------------------------
+# 根区间计算：唯一需要出生数据、星宿表、days_in_year 的地方
+# ---------------------------------------------------------------------------
+
+@_decimal_precision
+def _compute_dasha_root(
+    context: AstroContext,
+    moon_lon: float,
+    *,
+    days_in_year: float = 365.25,
+    star_table_path: str | Path | None = None,
+) -> DashaInterval:
+    """定位月亮所在星宿 -> 星宿主星已耗时间 -> 真实大运起点，返回一个
+    "虚拟根区间"：行星 = 星宿主星，时长 = 120 年整周期，起点 = 大运真实
+    起始时刻。对它调用一次 `divide_dasha_interval` 就是第一层
+    （Mahadasha）的 9 段。
+
+    直接使用 `core.parse_time_geo()` 已经算好的 `context.local_dt`
+    （带时区、已按 calendar 转换成格里历），不重新解析任何原始字符串。
+    """
+    elapsed_fraction, star_lord = _locate_nakshatra(moon_lon, table_path=star_table_path)
+
+    seconds_per_year = Decimal(str(days_in_year)) * Decimal(86400)
+    star_lord_total_seconds = seconds_per_year * PLANET_YEARS[star_lord]
+    elapsed_seconds = star_lord_total_seconds * elapsed_fraction
+
+    dasha_start = context.local_dt - _decimal_seconds_to_timedelta(elapsed_seconds)
+    full_cycle_seconds = seconds_per_year * TOTAL_CYCLE_YEARS
+    return DashaInterval(planet=star_lord, start=dasha_start, duration_seconds=full_cycle_seconds)
+
+
+# ---------------------------------------------------------------------------
+# 公开入口：供上层（notebook / 未来 Flask 层）直接调用
+# ---------------------------------------------------------------------------
+
+def get_dasha_level1(
+    context: AstroContext,
+    moon_lon: float,
+    *,
+    days_in_year: float = 365.25,
+    star_table_path: str | Path | None = None,
+) -> list[DashaInterval]:
+    """一次排盘（或前端刷新/调整参数重新排盘）只算这一层：返回第一层
+    （Mahadasha）的 9 段区间。对应未来 Flask 层的 ``/dasha/root``。
+    """
+    root = _compute_dasha_root(
+        context, moon_lon, days_in_year=days_in_year, star_table_path=star_table_path
+    )
+    return divide_dasha_interval(root)
+
+
+def expand_dasha_interval(
+    planet: str,
+    start: str | datetime,
+    duration_seconds: str | Decimal,
+) -> list[DashaInterval]:
+    """点击某个大运区间时调用：只需要被点击区间自带的三元组（行星、起点、
+    时长），不需要出生数据、星宿表或 days_in_year——这些信息已经隐式携带
+    在 ``duration_seconds`` 的比例里了。对应未来 Flask 层的
+    ``/dasha/expand``，后端因此可以完全无状态。
+
+    ``start``/``duration_seconds`` 建议直接传回上一次 `DashaInterval.to_dict()`
+    里的原始字符串，而不是先转成 float 再传——这样才能保住 Decimal 精度
+    全程不经过网络传输时的一次 float 转换。
+    """
+    start_dt = datetime.fromisoformat(start) if isinstance(start, str) else start
+    duration = (
+        duration_seconds if isinstance(duration_seconds, Decimal) else Decimal(str(duration_seconds))
+    )
+    node = DashaInterval(planet=planet, start=start_dt, duration_seconds=duration)
+    return divide_dasha_interval(node)
+
+
+########## FILE: quant_astro\kp.py ##########
+"""KP 星主、象意星、宫位象意与主宰星计算。"""
+
+from __future__ import annotations
+
+import csv
+import os
+import re
+from bisect import bisect_right
+from collections import defaultdict
+from dataclasses import dataclass
+from functools import lru_cache
+from importlib.resources import files
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any, Iterable, Mapping
+
+import swisseph as swe
+
+# solve_horary_houses 需要真正调用 core 的宫位/星历计算，这是一个模块级、
+# 单向的依赖（kp 依赖 core，而不是 core 反过来 import kp）。_SWISS_LOCK、
+# _house_flags、_jd_to_local 是 core 内部的私有帮助函数，但两者同属一个包，
+# 包内共享属于正常用法；只是不会经 __init__.py 暴露给包外部使用者。
+from .core import (
+    AstroContext,
+    HOUSE_SYSTEMS,
+    _house_flags,
+    _jd_to_local,
+    _SWISS_LOCK,
+    calculate_houses,
+    set_ephemeris_path,
+)
+
+
+_NUMERIC_COLUMNS = {"From", "To", "Degree", "Min", "Second", "KS-N", "CIL-N", "KS-D", "paada"}
+
+
+def _default_table_path() -> Path:
+    env_path = os.getenv("QUANT_ASTRO_KP_TABLE")
+    if env_path:
+        return Path(env_path).expanduser().resolve()
+
+    local = Path(__file__).resolve().parent / "data" / "sub-sub.csv"
+    if local.exists():
+        return local
+
+    package_names = [name for name in (__package__, "quant_astro") if name]
+    for package_name in package_names:
+        try:
+            candidate = Path(str(files(package_name).joinpath("data/sub-sub.csv")))
+            if candidate.exists():
+                return candidate
+        except (ModuleNotFoundError, TypeError):
+            continue
+    raise FileNotFoundError(
+        "找不到 data/sub-sub.csv。请保留原 quant_astro/data 目录，"
+        "或设置环境变量 QUANT_ASTRO_KP_TABLE 指向该文件。"
+    )
+
+
+@lru_cache(maxsize=8)
+def _load_kp_table_cached(path_text: str) -> tuple[tuple[dict[str, Any], ...], tuple[float, ...]]:
+    rows: list[dict[str, Any]] = []
+    with Path(path_text).open("r", encoding="utf-8-sig", newline="") as handle:
+        for source in csv.DictReader(handle):
+            row: dict[str, Any] = {}
+            for key, value in source.items():
+                if key in _NUMERIC_COLUMNS and value not in (None, ""):
+                    row[key] = float(value)
+                else:
+                    row[key] = value
+            row["From"] = float(row["From"])
+            row["To"] = 360.0 if float(row["To"]) == 0.0 else float(row["To"])
+            rows.append(row)
+    if not rows:
+        raise ValueError(f"KP 查找表为空：{path_text}")
+    rows.sort(key=lambda item: item["From"])
+    return tuple(rows), tuple(float(item["From"]) for item in rows)
+
+
+def load_kp_table(table_path: str | Path | None = None) -> tuple[dict[str, Any], ...]:
+    """加载并缓存 KP 表。默认读取包内 ``data/sub-sub.csv``。"""
+    path = Path(table_path).expanduser().resolve() if table_path else _default_table_path()
+    # 不暴露缓存中的可变 dict，避免调用方修改一行后污染进程内所有后续查询。
+    return tuple(dict(row) for row in _load_kp_table_cached(str(path))[0])
+
+
+def _table_with_starts(table_path: str | Path | None = None) -> tuple[tuple[dict[str, Any], ...], tuple[float, ...]]:
+    path = Path(table_path).expanduser().resolve() if table_path else _default_table_path()
+    return _load_kp_table_cached(str(path))
+
+
+def kp_lookup(longitude: float, *, table_path: str | Path | None = None) -> dict[str, Any]:
+    """以单个黄经查询 Sign/Star/Sub/Sub-Sub、Paada 及各级星主。"""
+    lon = float(longitude) % 360.0
+    rows, starts = _table_with_starts(table_path)
+    index = bisect_right(starts, lon) - 1
+    if index < 0:
+        index = len(rows) - 1
+    row = rows[index]
+    if not (float(row["From"]) <= lon < float(row["To"])):
+        # 防御非连续或未排序的外部表。
+        row = next(
+            (candidate for candidate in rows if float(candidate["From"]) <= lon < float(candidate["To"])),
+            None,
+        )
+        if row is None:
+            raise LookupError(f"KP 表中没有覆盖黄经 {lon}° 的区间。")
+    return {
+        "sign": row["Sign"],
+        "star": row["Star"],
+        "sign_lord": row["Sign-Lord"],
+        "star_lord": row["Star-Lord"],
+        "sub_lord": row["Sub-Lord"],
+        "sub_sub_lord": row["Sub-Sub-Lord"],
+        "sign_degree": lon % 30.0,
+        "paada": int(float(row["paada"])),
+    }
+
+
+def kp_lookup_many(
+    values: Mapping[str, float | Mapping[str, Any]] | Iterable[float],
+    *,
+    table_path: str | Path | None = None,
+) -> dict[str, dict[str, Any]] | list[dict[str, Any]]:
+    """批量 KP 查询；字典值既可为黄经，也可为含 ``lon`` 的坐标字典。"""
+    if isinstance(values, Mapping):
+        output: dict[str, dict[str, Any]] = {}
+        for name, value in values.items():
+            longitude = value["lon"] if isinstance(value, Mapping) else value
+            output[str(name)] = kp_lookup(float(longitude), table_path=table_path)
+        return output
+    return [kp_lookup(float(value), table_path=table_path) for value in values]
+
+
+def get_horary_ascendant(
+    number: int,
+    *,
+    mode: str = "KS-N",
+    table_path: str | Path | None = None,
+) -> float:
+    """将 1–249（KS-N）或 1–2193（CIL-N）签号转换为目标上升黄经。"""
+    normalized_mode = mode.strip().upper()
+    if normalized_mode in {"KS-N", "249"}:
+        number_column, result_column, lower, upper = "KS-N", "KS-D", 1, 249
+    elif normalized_mode in {"CIL-N", "2193", "1-2193"}:
+        number_column, result_column, lower, upper = "CIL-N", "From", 1, 2193
+    else:
+        raise ValueError("mode 只能是 'KS-N'（249）或 'CIL-N'/'1-2193'（2193）。")
+    try:
+        target_number = int(number)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("卜卦签号必须是整数。") from exc
+    if target_number != float(number) or not lower <= target_number <= upper:
+        raise ValueError(f"{normalized_mode} 签号必须是 {lower}–{upper} 的整数。")
+
+    for row in load_kp_table(table_path):
+        if int(float(row[number_column])) == target_number:
+            return float(row[result_column]) % 360.0
+    raise LookupError(f"KP 表中找不到 {normalized_mode} 签号 {target_number}。")
+
+
+def _unwrap_house_positions(
+    house_data: Mapping[str, Any],
+) -> Mapping[str, Mapping[str, Any]]:
+    """同时接受 calculate_houses 的完整结果或旧式纯宫头字典。"""
+    nested = house_data.get("houses")
+    if isinstance(nested, Mapping):
+        return nested
+    return house_data
+
+
+def get_kp_lords(
+    planet_dict: Mapping[str, Mapping[str, Any]],
+    house_dict: Mapping[str, Any],
+    *,
+    table_path: str | Path | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """分别批量查询行星和宫头；可直接传入完整宫位求解结果。"""
+    return (
+        kp_lookup_many(planet_dict, table_path=table_path),
+        kp_lookup_many(_unwrap_house_positions(house_dict), table_path=table_path),
+    )
+
+
+def _house_number(key: str) -> int:
+    match = re.search(r"(\d+)$", str(key).strip())
+    if not match:
+        raise ValueError(f"无法从宫位键 {key!r} 提取宫号。")
+    number = int(match.group(1))
+    if not 1 <= number <= 12:
+        raise ValueError(f"宫号超出 1–12：{number}")
+    return number
+
+
+def _house_for_longitude(longitude: float, cusps: Mapping[int, float]) -> int:
+    lon = float(longitude) % 360.0
+    for number in range(1, 13):
+        start = cusps[number] % 360.0
+        end = cusps[1 if number == 12 else number + 1] % 360.0
+        if start < end and start <= lon < end:
+            return number
+        if start >= end and (lon >= start or lon < end):
+            return number
+    raise RuntimeError(f"无法判断黄经 {lon}° 的落宫。")
+
+
+def _deduplicate(values: Iterable[Any]) -> list[Any]:
+    return list(dict.fromkeys(value for value in values if value is not None))
+
+
+def _kp_houses_by_number(
+    kp_house_results: Mapping[str, Mapping[str, Any] | None],
+) -> dict[int, Mapping[str, Any]]:
+    return {
+        _house_number(key): value
+        for key, value in kp_house_results.items()
+        if value is not None
+    }
+
+
+@dataclass(frozen=True)
+class SignificatorMaps:
+    """ABCD 与 1234 共用的中间映射，可在局部刷新时复用。"""
+
+    planet_order: tuple[str, ...]
+    occupancy: Mapping[str, int]
+    ownership: Mapping[str, tuple[int, ...]]
+    star_lords: Mapping[str, str]
+    house_occupants: Mapping[int, tuple[str, ...]]
+
+
+def build_significator_maps(
+    planet_pos: Mapping[str, Mapping[str, Any]],
+    house_pos: Mapping[str, Any],
+    kp_planet_results: Mapping[str, Mapping[str, Any] | None],
+    kp_house_results: Mapping[str, Mapping[str, Any] | None],
+) -> SignificatorMaps:
+    """一次建立两类象意计算共用的落宫、守护与宿主映射。"""
+    cusp_positions = _unwrap_house_positions(house_pos)
+    cusps = {_house_number(key): float(value["lon"]) for key, value in cusp_positions.items()}
+    missing = set(range(1, 13)) - set(cusps)
+    if missing:
+        raise ValueError(f"宫位数据不完整，缺少：{sorted(missing)}")
+
+    occupancy = {
+        name: _house_for_longitude(float(position["lon"]), cusps)
+        for name, position in planet_pos.items()
+    }
+    ownership_lists: defaultdict[str, list[int]] = defaultdict(list)
+    for key, kp_data in kp_house_results.items():
+        if kp_data:
+            ownership_lists[str(kp_data["sign_lord"])].append(_house_number(key))
+    ownership = {name: tuple(sorted(set(houses))) for name, houses in ownership_lists.items()}
+    star_lords = {
+        name: str(kp_data["star_lord"])
+        for name, kp_data in kp_planet_results.items()
+        if kp_data and kp_data.get("star_lord")
+    }
+    house_occupants_lists: defaultdict[int, list[str]] = defaultdict(list)
+    for planet, house in occupancy.items():
+        house_occupants_lists[house].append(planet)
+    house_occupants = {
+        number: tuple(house_occupants_lists.get(number, ()))
+        for number in range(1, 13)
+    }
+    return SignificatorMaps(
+        planet_order=tuple(planet_pos),
+        occupancy=MappingProxyType(occupancy),
+        ownership=MappingProxyType(ownership),
+        star_lords=MappingProxyType(star_lords),
+        house_occupants=MappingProxyType(house_occupants),
+    )
+
+
+def calculate_planet_significators(
+    planet_pos: Mapping[str, Mapping[str, Any]],
+    house_pos: Mapping[str, Any],
+    kp_planet_results: Mapping[str, Mapping[str, Any] | None],
+    kp_house_results: Mapping[str, Mapping[str, Any] | None],
+    *,
+    shared_maps: SignificatorMaps | None = None,
+) -> dict[str, dict[str, list[int]]]:
+    """独立计算行星 ABCD 象意宫位。传入 ``shared_maps`` 可免除重复映射。"""
+    maps = shared_maps or build_significator_maps(
+        planet_pos, house_pos, kp_planet_results, kp_house_results
+    )
+    output: dict[str, dict[str, list[int]]] = {}
+    for planet in maps.planet_order:
+        star_lord = maps.star_lords.get(planet)
+        output[planet] = {
+            "A": _deduplicate([maps.occupancy.get(star_lord)] if star_lord else []),
+            "B": _deduplicate([maps.occupancy.get(planet)]),
+            "C": list(maps.ownership.get(star_lord, ())) if star_lord else [],
+            "D": list(maps.ownership.get(planet, ())),
+        }
+    return output
+
+
+def calculate_house_significators(
+    planet_pos: Mapping[str, Mapping[str, Any]],
+    house_pos: Mapping[str, Any],
+    kp_planet_results: Mapping[str, Mapping[str, Any] | None],
+    kp_house_results: Mapping[str, Mapping[str, Any] | None],
+    *,
+    shared_maps: SignificatorMaps | None = None,
+) -> dict[int, dict[str, list[str]]]:
+    """独立计算 12 宫的 1234 级象意星。传入 ``shared_maps`` 可免除重复映射。"""
+    maps = shared_maps or build_significator_maps(
+        planet_pos, house_pos, kp_planet_results, kp_house_results
+    )
+    output: dict[int, dict[str, list[str]]] = {}
+    kp_houses = _kp_houses_by_number(kp_house_results)
+    for house_number in range(1, 13):
+        kp_data = kp_houses.get(house_number)
+        lord = str(kp_data["sign_lord"]) if kp_data else None
+        occupants = list(maps.house_occupants[house_number])
+        level_1 = [
+            planet
+            for occupant in occupants
+            for planet, star_lord in maps.star_lords.items()
+            if star_lord == occupant
+        ]
+        level_3 = [
+            planet
+            for planet, star_lord in maps.star_lords.items()
+            if lord is not None and star_lord == lord
+        ]
+        output[house_number] = {
+            "1": _deduplicate(level_1),
+            "2": _deduplicate(occupants),
+            "3": _deduplicate(level_3),
+            "4": [lord] if lord else [],
+        }
+    return output
+
+
+def calculate_significators(
+    planet_pos: Mapping[str, Mapping[str, Any]],
+    house_pos: Mapping[str, Any],
+    kp_planet_results: Mapping[str, Mapping[str, Any] | None],
+    kp_house_results: Mapping[str, Mapping[str, Any] | None],
+) -> tuple[dict[str, dict[str, list[int]]], dict[int, dict[str, list[str]]]]:
+    """同时需要 ABCD 与 1234 时只建立一次共享映射。"""
+    maps = build_significator_maps(planet_pos, house_pos, kp_planet_results, kp_house_results)
+    return (
+        calculate_planet_significators(
+            planet_pos,
+            house_pos,
+            kp_planet_results,
+            kp_house_results,
+            shared_maps=maps,
+        ),
+        calculate_house_significators(
+            planet_pos,
+            house_pos,
+            kp_planet_results,
+            kp_house_results,
+            shared_maps=maps,
+        ),
+    )
+
+
+def get_ruling_planets(
+    kp_planet_results: Mapping[str, Mapping[str, Any] | None],
+    kp_house_results: Mapping[str, Mapping[str, Any] | None],
+    day_lord: str | Mapping[str, Any] | None = None,
+    *,
+    asc_kp_result: Mapping[str, Any] | None = None,
+) -> dict[str, str | None]:
+    """提取真实 Asc、Moon 的 Sign/Star/Sub Lord，并按需加入值日星。
+
+    ``asc_kp_result`` 应由四轴中的真实 ``axes['Asc']['lon']`` 查询得到。
+    未传时为兼容旧调用才回退到第一宫宫头；Whole Sign、Vehlow、Equal/Zodiac
+    等宫位制下第一宫宫头并不等于真实 Asc，新的调用代码始终显式传入该参数。
+    """
+    asc = asc_kp_result or _kp_houses_by_number(kp_house_results).get(1, {})
+    moon = kp_planet_results.get("Mo") or {}
+    result: dict[str, str | None] = {
+        "Asc_Sign_Lord": asc.get("sign_lord"),
+        "Asc_Star_Lord": asc.get("star_lord"),
+        "Asc_Sub_Lord": asc.get("sub_lord"),
+        "Moon_Sign_Lord": moon.get("sign_lord"),
+        "Moon_Star_Lord": moon.get("star_lord"),
+        "Moon_Sub_Lord": moon.get("sub_lord"),
+    }
+    if isinstance(day_lord, Mapping):
+        day_lord = day_lord.get("day_lord")
+    if day_lord:
+        result["Day_Lord"] = str(day_lord)
+    return result
+
+
+# 旧调用名保留为轻量别名，便于渐进迁移。
+get_significators = calculate_significators
+
+
+def _ascendant_at(jd_utc: float, lat: float, lon: float, system_code: bytes, flags: int) -> float:
+    # Ascendant 始终取 ascmc[0]，不能用第一宫宫头代替；Whole Sign、Vehlow 等
+    # 宫位制的第一宫宫头并不等于真实上升点。
+    ascmc = swe.houses_ex(jd_utc, lat, lon, system_code, flags=flags)[1]
+    return float(ascmc[0] % 360.0)
+
+
+def _find_ascendant_time(
+    target: float,
+    initial_jd: float,
+    lat: float,
+    lon: float,
+    system_code: bytes,
+    flags: int,
+    *,
+    tolerance: float = 1e-8,
+    max_iter: int = 80,
+) -> float:
+    """先采样找最近的过零区间，再二分；搜索中只保留上升点。"""
+    target %= 360.0
+    step = 1.0 / 144.0  # 10 分钟
+    samples = [initial_jd - 0.55 + index * step for index in range(160)]
+    angles = [_ascendant_at(jd, lat, lon, system_code, flags) for jd in samples]
+    unwrapped = [angles[0]]
+    for angle in angles[1:]:
+        previous_mod = unwrapped[-1] % 360.0
+        delta = (angle - previous_mod + 180.0) % 360.0 - 180.0
+        unwrapped.append(unwrapped[-1] + delta)
+
+    brackets: list[tuple[float, float, float, float]] = []
+    minimum = min(unwrapped)
+    maximum = max(unwrapped)
+    first_k = int((minimum - target) // 360.0) - 1
+    last_k = int((maximum - target) // 360.0) + 1
+    for k in range(first_k, last_k + 1):
+        target_unwrapped = target + 360.0 * k
+        for index in range(len(samples) - 1):
+            left_value = unwrapped[index] - target_unwrapped
+            right_value = unwrapped[index + 1] - target_unwrapped
+            if left_value == 0.0 or left_value * right_value <= 0.0:
+                brackets.append((samples[index], samples[index + 1], target_unwrapped, unwrapped[index]))
+    if not brackets:
+        raise RuntimeError("无法在出生时刻附近找到目标上升点；高纬地区可尝试更换宫位制。")
+    left, right, target_unwrapped, left_angle = min(
+        brackets, key=lambda item: abs((item[0] + item[1]) / 2.0 - initial_jd)
+    )
+
+    for _ in range(max_iter):
+        mid = (left + right) / 2.0
+        angle = _ascendant_at(mid, lat, lon, system_code, flags)
+        cycles = round((target_unwrapped - angle) / 360.0)
+        mid_angle = angle + cycles * 360.0
+        difference = mid_angle - target_unwrapped
+        if abs(difference) <= tolerance:
+            return mid
+        if (left_angle - target_unwrapped) * difference <= 0.0:
+            right = mid
+        else:
+            left = mid
+            left_angle = mid_angle
+    return (left + right) / 2.0
+
+
+def solve_horary_houses(
+    context: AstroContext,
+    number: int,
+    *,
+    mode: str = "KS-N",
+    house_system: str = "Placidus",
+    ecliptic_mode: str = "sidereal",
+    ayanamsha_mode: str | int = "SIDM_KRISHNAMURTI",
+    tolerance: float = 1e-8,
+    ephe_path: str | Path | None = None,
+    kp_table_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """由 249/2193 签号反推上升点，定位后仅调用一次完整宫位求解器。"""
+    # Gauquelin 不在 HOUSE_SYSTEMS 里，所以下面这一句必须先判断它，否则
+    # "not in HOUSE_SYSTEMS" 已经先成立，"== 'Gauquelin'" 永远轮不到、
+    # 报错信息也就说不出具体原因（core.calculate_houses 里就是这个顺序）。
+    if house_system == "Gauquelin":
+        raise ValueError("Gauquelin 返回 36 个 sector，不属于 12 宫接口，卜卦不支持。")
+    if house_system not in HOUSE_SYSTEMS:
+        raise ValueError(f"卜卦不支持宫位制：{house_system!r}")
+
+    target_asc = get_horary_ascendant(number, mode=mode, table_path=kp_table_path)
+    effective_ephe_path = ephe_path if ephe_path is not None else context.ephe_path
+    with _SWISS_LOCK:
+        # 卜卦搜索也是独立入口，不能假设此前调用过时间解析或行星函数。
+        set_ephemeris_path(effective_ephe_path)
+        flags = _house_flags(ecliptic_mode, ayanamsha_mode)
+        solved_jd = _find_ascendant_time(
+            target_asc,
+            context.jd_utc,
+            context.lat,
+            context.lon,
+            HOUSE_SYSTEMS[house_system],
+            flags,
+            tolerance=tolerance,
+        )
+    house_result = calculate_houses(
+        context,
+        house_system,
+        ecliptic_mode=ecliptic_mode,
+        ayanamsha_mode=ayanamsha_mode,
+        jd_utc=solved_jd,
+        ephe_path=effective_ephe_path,
+    )
+    return {
+        "number": int(number),
+        "mode": mode.upper(),
+        "target_asc": target_asc,
+        "solved_jd_utc": solved_jd,
+        "solved_local_dt": _jd_to_local(solved_jd, context.local_dt.tzinfo),
+        "house_system": house_result["house_system"],
+        "ecliptic_mode": house_result["ecliptic_mode"],
+        "houses": house_result["houses"],
+        "axes": house_result["axes"],
+        "auxiliary_points": house_result["auxiliary_points"],
+    }
+
+
+########## FILE: quant_astro\__init__.py ##########
+"""quant_astro 本地 Web 解耦计算接口（不包含服务端、Dasha 与庙旺落陷）。"""
+
+from .core import (
+    AstroContext,
+    CHALDEAN_ORDER,
+    HOUSE_SYSTEMS,
+    MAIN_PLANETS,
+    MINOR_PLANETS,
+    WEEKDAY_LORDS,
+    calculate_day_lord,
+    calculate_fixed_stars,
+    calculate_houses,
+    calculate_minor_planets,
+    calculate_planetary_hour,
+    calculate_planets,
+    calculate_sunrise_sunset,
+    decimal_to_dms,
+    parse_time_geo,
+    set_ephemeris_path,
+)
+from .kp import (
+    SignificatorMaps,
+    build_significator_maps,
+    calculate_house_significators,
+    calculate_planet_significators,
+    calculate_significators,
+    get_horary_ascendant,
+    get_kp_lords,
+    get_ruling_planets,
+    get_significators,
+    kp_lookup,
+    kp_lookup_many,
+    load_kp_table,
+    solve_horary_houses,  # 本体现在住在 kp.py（它依赖 KP 查表反推上升点）
+)
+
+# 注意：此前这里写的是 "0.2.1"，但 setup.py 里 version='0.1.8'，两处对不上。
+# 这次顺带同步成一致的版本号，后续发布记得两边一起改。
+__version__ = "0.2.2"
+
+__all__ = [
+    "AstroContext",
+    "CHALDEAN_ORDER",
+    "HOUSE_SYSTEMS",
+    "MAIN_PLANETS",
+    "MINOR_PLANETS",
+    "WEEKDAY_LORDS",
+    "SignificatorMaps",
+    "build_significator_maps",
+    "calculate_day_lord",
+    "calculate_fixed_stars",
+    "calculate_house_significators",
+    "calculate_houses",
+    "calculate_minor_planets",
+    "calculate_planet_significators",
+    "calculate_planetary_hour",
+    "calculate_planets",
+    "calculate_significators",
+    "calculate_sunrise_sunset",
+    "decimal_to_dms",
+    "get_horary_ascendant",
+    "get_kp_lords",
+    "get_ruling_planets",
+    "get_significators",
+    "kp_lookup",
+    "kp_lookup_many",
+    "load_kp_table",
+    "parse_time_geo",
+    "set_ephemeris_path",
+    "solve_horary_houses",
+]
+
+
+########## FILE: static\app.js ##########
+"use strict";
+
+const state = {
+    settings: null,
+    optionsMeta: null,
+    results: {},
+    profiles: [],
+    activeProfileId: null,
+    sourceMode: "current",
+    initialized: false,
+    requestToken: 0,
+};
+
+// 排盘后自动定位并展开 Dasha 到第几层（含第 1 层大运）；改这个数字即可调整深度。
+const AUTO_DASHA_LOCATE_DEPTH = 3;
+
+const $ = (id) => document.getElementById(id);
+
+function setStatus(text) {
+    $("statusBadge").textContent = text;
+}
+
+function showError(message) {
+    const box = $("errorBox");
+    if (!message) {
+        box.textContent = "";
+        box.classList.add("hidden");
+        return;
+    }
+    box.textContent = String(message);
+    box.classList.remove("hidden");
+}
+
+async function api(url, options = {}) {
+    const response = await fetch(url, {
+        headers: {"Content-Type": "application/json"},
+        ...options,
+    });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || `请求失败：HTTP ${response.status}`);
+    }
+    return payload.data;
+}
+
+function pad2(n) {
+    return String(n).padStart(2, "0");
+}
+
+function localDateTimeString(date = new Date()) {
+    return [
+        date.getFullYear(), "-", pad2(date.getMonth() + 1), "-", pad2(date.getDate()),
+        "T", pad2(date.getHours()), ":", pad2(date.getMinutes()), ":", pad2(date.getSeconds()),
+    ].join("");
+}
+
+function timezoneOffsetString(date = new Date()) {
+    const totalMinutes = -date.getTimezoneOffset();
+    const sign = totalMinutes >= 0 ? "+" : "-";
+    const abs = Math.abs(totalMinutes);
+    return `${sign}${pad2(Math.floor(abs / 60))}:${pad2(abs % 60)}`;
+}
+
+function selectedValues(selectElement) {
+    return Array.from(selectElement.selectedOptions).map((option) => option.value);
+}
+
+function setMultiSelect(selectElement, values) {
+    const wanted = new Set(values || []);
+    Array.from(selectElement.options).forEach((option) => {
+        option.selected = wanted.has(option.value);
+    });
+}
+
+function fillSelect(selectElement, values) {
+    selectElement.innerHTML = "";
+    for (const value of values) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = value;
+        selectElement.appendChild(option);
+    }
+}
+
+function setFormFromDefaults() {
+    const birth = state.settings.birth_defaults;
+    const calc = state.settings.calculation_defaults;
+
+    $("elevation").value = birth.elevation;
+    $("atpress").value = birth.atpress;
+    $("attemp").value = birth.attemp;
+    $("calendar").value = birth.calendar;
+
+    $("eclipticMode").value = calc.ecliptic_mode;
+    $("ayanamshaMode").value = calc.ayanamsha_mode;
+    $("nodeMode").value = calc.node_mode;
+    $("houseSystem").value = calc.house_system;
+    $("heliocentric").checked = Boolean(calc.heliocentric);
+    $("strictEphe").checked = Boolean(calc.strict_ephe);
+    setMultiSelect($("selectedPlanets"), calc.selected_planets);
+    setMultiSelect($("selectedMinorPlanets"), calc.selected_minor_planets);
+    $("selectedStars").value = (calc.selected_stars || []).join("\n");
+    $("horaryActive").checked = Boolean(calc.KP_HORARY?.is_active);
+    $("horaryMode").value = calc.KP_HORARY?.mode || "KS-N";
+    $("horaryNumber").value = calc.KP_HORARY?.number ?? 78;
+    $("dashaDaysInYear").value = calc.dasha_days_in_year ?? 365.25;
+}
+
+// KS-N 上限 249，CIL-N 上限 2193（对应 kp.py 的 get_horary_ascendant）。
+function updateHoraryRange() {
+    const mode = $("horaryMode").value;
+    const max = mode === "CIL-N" ? 2193 : 249;
+    const input = $("horaryNumber");
+    input.max = String(max);
+    input.placeholder = `1-${max}`;
+
+    const current = Number(input.value);
+    if (!current || current < 1) input.value = "1";
+    else if (current > max) input.value = String(max);
+}
+
+function formComplete() {
+    return Boolean(
+        $("localTime").value &&
+        $("timezone").value.trim() &&
+        $("latitude").value !== "" &&
+        $("longitude").value !== ""
+    );
+}
+
+function collectPayload() {
+    return {
+        birth: {
+            local_time_str: $("localTime").value.replace("T", " "),
+            timezone_str: $("timezone").value.trim(),
+            latitude: Number($("latitude").value),
+            longitude: Number($("longitude").value),
+            elevation: Number($("elevation").value || 0),
+            atpress: Number($("atpress").value || 1013.25),
+            attemp: Number($("attemp").value || 20),
+            calendar: $("calendar").value,
+        },
+        options: {
+            ecliptic_mode: $("eclipticMode").value,
+            ayanamsha_mode: $("ayanamshaMode").value.trim(),
+            node_mode: $("nodeMode").value,
+            house_system: $("houseSystem").value,
+            heliocentric: $("heliocentric").checked,
+            strict_ephe: $("strictEphe").checked,
+            selected_planets: selectedValues($("selectedPlanets")),
+            selected_minor_planets: selectedValues($("selectedMinorPlanets")),
+            selected_stars: $("selectedStars").value
+                .split(/\r?\n/)
+                .map((x) => x.trim())
+                .filter(Boolean),
+            KP_HORARY: {
+                is_active: $("horaryActive").checked,
+                mode: $("horaryMode").value,
+                number: Number($("horaryNumber").value || 1),
+            },
+            sunrise_rsmi: state.settings.calculation_defaults.sunrise_rsmi,
+            dasha_days_in_year: Number($("dashaDaysInYear").value || 365.25),
+        },
+    };
+}
+
+function escapeHtml(value) {
+    return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+}
+
+function formatValue(value) {
+    if (value === null || value === undefined) return "";
+    if (typeof value === "object") {
+        return `<pre>${escapeHtml(JSON.stringify(value, null, 2))}</pre>`;
+    }
+    return escapeHtml(String(value));
+}
+
+function renderKeyValue(target, obj) {
+    const container = $(target);
+    if (!obj || Object.keys(obj).length === 0) {
+        container.innerHTML = "<p class='muted'>无数据</p>";
+        return;
+    }
+
+    let html = "<div class='table-wrap'><table><tbody>";
+    for (const [key, value] of Object.entries(obj)) {
+        html += `<tr><th>${escapeHtml(key)}</th><td>${formatValue(value)}</td></tr>`;
+    }
+    html += "</tbody></table></div>";
+    container.innerHTML = html;
+}
+
+function renderObjectMap(target, obj) {
+    const container = $(target);
+    if (!obj || Object.keys(obj).length === 0) {
+        container.innerHTML = "<p class='muted'>无数据</p>";
+        return;
+    }
+
+    const first = Object.values(obj)[0];
+    if (typeof first !== "object" || first === null || Array.isArray(first)) {
+        renderKeyValue(target, obj);
+        return;
+    }
+
+    const columns = new Set();
+    Object.values(obj).forEach((row) => {
+        Object.keys(row || {}).forEach((key) => columns.add(key));
+    });
+
+    const cols = Array.from(columns);
+    let html = "<div class='table-wrap'><table><thead><tr><th>项目</th>";
+    html += cols.map((c) => `<th>${escapeHtml(c)}</th>`).join("");
+    html += "</tr></thead><tbody>";
+
+    for (const [name, row] of Object.entries(obj)) {
+        html += `<tr><th>${escapeHtml(name)}</th>`;
+        for (const col of cols) {
+            html += `<td>${formatValue(row?.[col])}</td>`;
+        }
+        html += "</tr>";
+    }
+
+    html += "</tbody></table></div>";
+    container.innerHTML = html;
+}
+
+function renderAllResults() {
+    renderKeyValue("contextResult", state.results.context || {});
+    renderObjectMap("planetResult", state.results.planet_pos || {});
+    renderObjectMap("minorPlanetResult", state.results.minor_planet_pos || {});
+    renderObjectMap("fixedStarResult", state.results.fixed_star_pos || {});
+
+    const house = state.results.house_result || {};
+    $("houseResult").innerHTML = `
+        <h3>十二宫宫头</h3><div id="houseCuspsInner"></div>
+        <h3>四轴</h3><div id="houseAxesInner"></div>
+        <h3>辅助轴点</h3><div id="houseAuxInner"></div>
+    `;
+    renderObjectMap("houseCuspsInner", house.houses || {});
+    renderObjectMap("houseAxesInner", house.axes || {});
+    renderObjectMap("houseAuxInner", house.auxiliary_points || {});
+
+    $("kpResult").innerHTML = `
+        <h3>KP 行星星主</h3><div id="kp1"></div>
+        <h3>KP 宫位星主</h3><div id="kp2"></div>
+        <h3>行星象征宫位 ABCD</h3><div id="kp3"></div>
+        <h3>宫位象征星 1234</h3><div id="kp4"></div>
+        <h3>真实 Asc KP</h3><div id="kp5"></div>
+        <h3>主宰星</h3><div id="kp6"></div>
+    `;
+    renderObjectMap("kp1", state.results.kp_planet_results || {});
+    renderObjectMap("kp2", state.results.kp_house_results || {});
+    renderObjectMap("kp3", state.results.kp_planet_sigs || {});
+    renderObjectMap("kp4", state.results.kp_house_sigs || {});
+    renderKeyValue("kp5", state.results.asc_kp_result || {});
+    renderKeyValue("kp6", state.results.kp_ruling_planets || {});
+
+    $("sunResult").innerHTML = `
+        <h3>日出日落</h3><div id="sun1"></div>
+        <h3>值日星</h3><div id="sun2"></div>
+        <h3>行星时</h3><div id="sun3"></div>
+    `;
+    renderKeyValue("sun1", state.results.sun_events || {});
+    renderKeyValue("sun2", state.results.day_lord_result || {});
+    renderKeyValue("sun3", state.results.planetary_hour_data || {});
+
+    renderDashaRoot();
+}
+
+function findNowIndex(items, now) {
+    for (let i = 0; i < items.length; i++) {
+        const start = new Date(items[i].start);
+        const end = new Date(items[i].end);
+        if (now >= start && now < end) return i;
+    }
+    return -1;
+}
+
+function fetchDashaChildren(item) {
+    return api("/api/dasha/expand", {
+        method: "POST",
+        body: JSON.stringify({
+            planet: item.planet,
+            start: item.start,
+            duration_seconds: item.duration_seconds,
+        }),
+    });
+}
+
+async function renderDashaRoot() {
+    const root = $("dashaResult");
+    root.innerHTML = "";
+    const data = state.results.dasha_level1 || [];
+    if (!data.length) {
+        root.innerHTML = "<p class='muted'>没有大运数据。请确认主行星选择中包含 Mo。</p>";
+        return;
+    }
+
+    const now = new Date();
+    let items = data;
+    let level = 1;
+    let wrapper = buildDashaLevel(items, level, findNowIndex(items, now));
+    root.appendChild(wrapper);
+
+    // 自动定位到包含"今天"的一支，并展开到 AUTO_DASHA_LOCATE_DEPTH 层；
+    // 之后仍然可以在任意层手动点击任意区间继续往下展开/收起（见 buildDashaLevel）。
+    while (level < AUTO_DASHA_LOCATE_DEPTH) {
+        const nowIndex = findNowIndex(items, now);
+        if (nowIndex === -1) break;
+
+        const holder = wrapper.children[nowIndex];
+        try {
+            const children = await fetchDashaChildren(items[nowIndex]);
+            level += 1;
+            wrapper = buildDashaLevel(children, level, findNowIndex(children, now));
+            holder.appendChild(wrapper);
+            items = children;
+        } catch (error) {
+            showError(error.message);
+            break;
+        }
+    }
+}
+
+function buildDashaLevel(items, level, nowIndex) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "dasha-level";
+    wrapper.dataset.level = String(level);
+
+    items.forEach((item, index) => {
+        const holder = document.createElement("div");
+        const row = document.createElement("div");
+        row.className = "dasha-row" + (index === nowIndex ? " current-dasha" : "");
+        row.innerHTML = `
+            <div class="dasha-planet">${escapeHtml(item.planet)}${
+                index === nowIndex ? '<span class="dasha-now-tag">当前</span>' : ""
+            }</div>
+            <div>${escapeHtml(item.start)}</div>
+            <div>${escapeHtml(item.end)}</div>
+        `;
+
+        row.addEventListener("click", async (event) => {
+            event.stopPropagation();
+
+            const existing = holder.querySelector(":scope > .dasha-level");
+            if (existing) {
+                existing.remove();
+                return;
+            }
+
+            try {
+                const children = await fetchDashaChildren(item);
+                holder.appendChild(buildDashaLevel(children, level + 1, findNowIndex(children, new Date())));
+            } catch (error) {
+                showError(error.message);
+            }
+        });
+
+        holder.appendChild(row);
+        wrapper.appendChild(holder);
+    });
+
+    return wrapper;
+}
+
+async function calculateFull() {
+    if (!formComplete()) {
+        showError("请先填写完整的本地时间、时区、纬度、经度。");
+        setStatus("参数不完整");
+        return;
+    }
+
+    const token = ++state.requestToken;
+    showError("");
+    setStatus("计算中");
+
+    try {
+        const result = await api("/api/chart/full", {
+            method: "POST",
+            body: JSON.stringify(collectPayload()),
+        });
+
+        if (token !== state.requestToken) return;
+
+        state.results = result;
+        renderAllResults();
+        setStatus("已更新");
+    } catch (error) {
+        if (token !== state.requestToken) return;
+        showError(error.message);
+        setStatus("计算失败");
+    }
+}
+
+async function calculatePartial(changedFields) {
+    if (!formComplete()) return;
+
+    if (!Object.keys(state.results).length) {
+        await calculateFull();
+        return;
+    }
+
+    const token = ++state.requestToken;
+    showError("");
+    setStatus("局部更新中");
+
+    try {
+        const payload = collectPayload();
+        payload.changed_fields = Array.from(changedFields);
+        payload.current_results = state.results;
+
+        const updates = await api("/api/chart/partial", {
+            method: "POST",
+            body: JSON.stringify(payload),
+        });
+
+        if (token !== state.requestToken) return;
+
+        Object.assign(state.results, updates);
+        renderAllResults();
+        setStatus("已更新");
+    } catch (error) {
+        if (token !== state.requestToken) return;
+        showError(error.message);
+        setStatus("计算失败");
+    }
+}
+
+// 不再逐字段自动排盘：当前时间/位置、手动输入这两种模式下，
+// 改完参数需要点这个按钮才会重新计算；calculatePartial() 保留在上面，
+// 只是暂时没有自动触发它的地方了，以后想恢复自动增量计算随时能接回来。
+function bindCalcButton() {
+    $("calcBtn").addEventListener("click", () => {
+        calculateFull();
+    });
+}
+
+function updateModeUI() {
+    $("profilePanel").classList.toggle("hidden", state.sourceMode !== "profile");
+    document.querySelectorAll("input[name='sourceMode']").forEach((radio) => {
+        radio.checked = radio.value === state.sourceMode;
+    });
+}
+
+async function initializeCurrentMode() {
+    state.sourceMode = "current";
+    updateModeUI();
+
+    $("localTime").value = localDateTimeString();
+    $("timezone").value = timezoneOffsetString();
+
+    const defaultLocation = state.settings.default_location;
+    $("latitude").value = defaultLocation.latitude;
+    $("longitude").value = defaultLocation.longitude;
+
+    let permissionText = "权限状态未知";
+    try {
+        if (navigator.permissions?.query) {
+            const status = await navigator.permissions.query({name: "geolocation"});
+            permissionText = `权限：${status.state}`;
+        }
+    } catch (_) {}
+
+    if (!navigator.geolocation) {
+        $("locationInfo").textContent =
+            `浏览器不支持 Geolocation API，已使用默认地点：${defaultLocation.label}。` +
+            `点击右上角「排盘」计算。`;
+        return;
+    }
+
+    $("locationInfo").textContent =
+        `正在通过浏览器 Geolocation API 请求位置。${permissionText}。` +
+        `网页无法判断底层实际来自 GPS、Wi‑Fi、基站还是系统融合定位。`;
+
+    await new Promise((resolve) => {
+        navigator.geolocation.getCurrentPosition(
+            (position) => {
+                $("latitude").value = position.coords.latitude.toFixed(6);
+                $("longitude").value = position.coords.longitude.toFixed(6);
+
+                const accuracy = Number.isFinite(position.coords.accuracy)
+                    ? `${Math.round(position.coords.accuracy)} 米`
+                    : "未知";
+
+                $("locationInfo").textContent =
+                    `定位方式：浏览器 Geolocation API；底层定位提供方不会暴露给网页。` +
+                    `报告精度：${accuracy}；${permissionText}。点击右上角「排盘」计算。`;
+                resolve();
+            },
+            (error) => {
+                $("locationInfo").textContent =
+                    `定位未获得，已使用默认地点：${defaultLocation.label}。` +
+                    `原因：${error.message || "用户拒绝、系统定位不可用或定位超时"}。` +
+                    `点击右上角「排盘」计算。`;
+                resolve();
+            },
+            {
+                enableHighAccuracy: true,
+                timeout: 8000,
+                maximumAge: 0,
+            }
+        );
+    });
+}
+
+function switchToManualMode() {
+    state.sourceMode = "manual";
+    updateModeUI();
+    $("locationInfo").textContent =
+        "手动输入模式：填好时间、时区、经纬度后，点击右上角「排盘」计算。";
+}
+
+function renderProfiles() {
+    const select = $("profileSelect");
+    select.innerHTML = "";
+
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = "请选择人物档案";
+    select.appendChild(empty);
+
+    for (const profile of state.profiles) {
+        const option = document.createElement("option");
+        option.value = String(profile.id);
+        option.textContent = profile.display_name;
+        select.appendChild(option);
+    }
+
+    if (state.activeProfileId) {
+        select.value = String(state.activeProfileId);
+    }
+}
+
+async function refreshProfiles() {
+    state.profiles = await api("/api/profiles");
+    renderProfiles();
+}
+
+function loadProfileIntoForm(profile) {
+    $("profileName").value = profile.display_name || "";
+    $("profileNote").value = profile.note || "";
+    $("localTime").value = String(profile.birth_time || "").replace(" ", "T");
+    $("timezone").value = profile.timezone_offset || "";
+    $("latitude").value = profile.latitude ?? "";
+    $("longitude").value = profile.longitude ?? "";
+}
+
+async function selectProfile(profileId) {
+    if (!profileId) return;
+    const profile = await api(`/api/profiles/${profileId}`);
+    state.activeProfileId = profile.id;
+    loadProfileIntoForm(profile);
+    await calculateFull();
+}
+
+function profilePayload() {
+    return {
+        display_name: $("profileName").value.trim(),
+        birth_time: $("localTime").value.replace("T", " "),
+        timezone_offset: $("timezone").value.trim(),
+        latitude: Number($("latitude").value),
+        longitude: Number($("longitude").value),
+        note: $("profileNote").value,
+    };
+}
+
+function bindProfileActions() {
+    $("profileSelect").addEventListener("change", async () => {
+        const id = Number($("profileSelect").value);
+        if (!id) return;
+        try {
+            await selectProfile(id);
+        } catch (error) {
+            showError(error.message);
+        }
+    });
+
+    $("newProfileBtn").addEventListener("click", () => {
+        state.activeProfileId = null;
+        $("profileSelect").value = "";
+        $("profileName").value = "";
+        $("profileNote").value = "";
+    });
+
+    $("saveProfileBtn").addEventListener("click", async () => {
+        // 保存永远新建一条档案（POST），不会覆盖当前选中的这份——
+        // 改了数值但没点保存 = 原档案不受影响；点了保存 = 多出一份新档案。
+        try {
+            const saved = await api("/api/profiles", {
+                method: "POST",
+                body: JSON.stringify(profilePayload()),
+            });
+            state.activeProfileId = saved.id;
+            await refreshProfiles();
+            $("profileSelect").value = String(saved.id);
+            setStatus("已另存为新档案");
+        } catch (error) {
+            showError(error.message);
+        }
+    });
+
+    $("deleteProfileBtn").addEventListener("click", async () => {
+        if (!state.activeProfileId) return;
+        if (!confirm("确定删除当前人物档案？")) return;
+
+        try {
+            await api(`/api/profiles/${state.activeProfileId}`, {
+                method: "DELETE",
+            });
+            state.activeProfileId = null;
+            $("profileName").value = "";
+            $("profileNote").value = "";
+            await refreshProfiles();
+            setStatus("档案已删除");
+        } catch (error) {
+            showError(error.message);
+        }
+    });
+}
+
+function bindModeSwitching() {
+    document.querySelectorAll("input[name='sourceMode']").forEach((radio) => {
+        radio.addEventListener("change", async () => {
+            const mode = radio.value;
+            if (mode === "current") {
+                await initializeCurrentMode();
+            } else if (mode === "manual") {
+                switchToManualMode();
+            } else if (mode === "profile") {
+                state.sourceMode = "profile";
+                updateModeUI();
+                $("locationInfo").textContent =
+                    "人物档案模式：选择档案后立即排盘；之后如果修改了数值，需要重新点击「排盘」才会用新数值计算。";
+            }
+        });
+    });
+}
+
+async function init() {
+    try {
+        setStatus("初始化中");
+        const bootstrap = await api("/api/bootstrap");
+
+        state.settings = bootstrap.settings;
+        state.optionsMeta = bootstrap.options;
+        state.profiles = bootstrap.profiles;
+
+        fillSelect($("houseSystem"), state.optionsMeta.house_systems);
+        fillSelect($("selectedPlanets"), state.optionsMeta.main_planets);
+        fillSelect($("selectedMinorPlanets"), state.optionsMeta.minor_planets);
+
+        setFormFromDefaults();
+        updateHoraryRange();
+        $("horaryMode").addEventListener("change", updateHoraryRange);
+        renderProfiles();
+
+        bindCalcButton();
+        bindModeSwitching();
+        bindProfileActions();
+
+        state.initialized = true;
+        await initializeCurrentMode();
+    } catch (error) {
+        showError(error.message);
+        setStatus("初始化失败");
+    }
+}
+
+window.addEventListener("DOMContentLoaded", init);
+
+
+########## FILE: static\style.css ##########
+:root {
+    color-scheme: light;
+    --bg: #f5f6f8;
+    --panel: #ffffff;
+    --border: #d9dde5;
+    --text: #1f2430;
+    --muted: #697386;
+    --accent: #375a7f;
+    --accent-soft: #eaf0f7;
+    --danger: #a33a3a;
+    --error-bg: #fff1f1;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+}
+
+.topbar {
+    display: flex;
+    justify-content: space-between;
+    gap: 24px;
+    align-items: center;
+    padding: 18px 24px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 20;
+}
+
+.topbar h1 { margin: 0 0 6px; font-size: 22px; }
+.topbar p { margin: 0; color: var(--muted); font-size: 13px; }
+
+.status-badge {
+    padding: 7px 11px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    white-space: nowrap;
+    font-size: 13px;
+}
+
+.topbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.calc-btn {
+    width: auto;
+    margin-top: 0;
+    padding: 9px 22px;
+    font-weight: 600;
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+.calc-btn:hover { background: #2c4a66; }
+.calc-btn:disabled { opacity: 0.6; cursor: default; }
+
+.layout {
+    display: grid;
+    grid-template-columns: 350px minmax(0, 1fr);
+    gap: 18px;
+    padding: 18px;
+    max-width: 1800px;
+    margin: 0 auto;
+}
+
+.sidebar, .content {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.content { min-width: 0; }
+
+.panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+}
+
+.panel h2 { margin: 0 0 14px; font-size: 17px; }
+
+label {
+    display: block;
+    margin: 10px 0;
+    font-size: 13px;
+    color: var(--muted);
+}
+
+input, select, textarea, button {
+    width: 100%;
+    margin-top: 5px;
+    font: inherit;
+}
+
+input, select, textarea {
+    padding: 8px 9px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #fff;
+    color: var(--text);
+}
+
+select[multiple] { min-height: 140px; }
+textarea { resize: vertical; }
+
+button {
+    cursor: pointer;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    background: #fff;
+}
+
+button:hover { background: var(--accent-soft); }
+button.danger { color: var(--danger); }
+
+.button-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+}
+
+.source-tabs {
+    display: grid;
+    gap: 8px;
+}
+
+.source-tabs label, .checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.source-tabs input, .checkbox-row input {
+    width: auto;
+    margin: 0;
+}
+
+.info-box {
+    margin-top: 12px;
+    padding: 10px;
+    border-radius: 6px;
+    background: var(--accent-soft);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.error-box {
+    padding: 12px 14px;
+    border: 1px solid #e6b3b3;
+    background: var(--error-bg);
+    color: #7f1d1d;
+    border-radius: 8px;
+    white-space: pre-wrap;
+}
+
+.hidden { display: none !important; }
+.muted { color: var(--muted); font-size: 12px; }
+
+.table-wrap { overflow-x: auto; }
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+th, td {
+    border-bottom: 1px solid var(--border);
+    padding: 8px 9px;
+    text-align: left;
+    vertical-align: top;
+}
+
+th {
+    background: #fafbfc;
+    white-space: nowrap;
+}
+
+pre {
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 12px;
+}
+
+.dasha-level {
+    margin-left: 18px;
+    border-left: 2px solid var(--border);
+    padding-left: 10px;
+}
+
+.dasha-row {
+    display: grid;
+    grid-template-columns: 60px 1fr 1fr;
+    gap: 10px;
+    align-items: center;
+    padding: 7px 8px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+}
+
+.dasha-row:hover { background: var(--accent-soft); }
+.dasha-planet { font-weight: 600; }
+
+.dasha-row.current-dasha {
+    background: #fff3d6;
+    border-color: #e8c477;
+}
+
+.dasha-now-tag {
+    margin-left: 8px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #8a5a00;
+    background: #ffe4a3;
+}
+
+fieldset {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-top: 14px;
+}
+
+legend {
+    color: var(--muted);
+    font-size: 13px;
+}
+
+@media (max-width: 980px) {
+    .layout { grid-template-columns: 1fr; }
+    .topbar { position: static; }
+}
+
+
+########## FILE: templates\index.html ##########
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quant Astro 本地排盘</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+    <div>
+        <h1>Quant Astro 本地排盘</h1>
+        <p>人物档案模式：选中档案即自动排盘。当前时间/位置、手动输入模式：填好参数后点击「排盘」。修改过数值后，也需要重新点击「排盘」才会用新数值计算。</p>
+    </div>
+    <div class="topbar-actions">
+        <button id="calcBtn" type="button" class="calc-btn">排盘</button>
+        <div id="statusBadge" class="status-badge">初始化中</div>
+    </div>
+</header>
+
+<main class="layout">
+    <aside class="sidebar">
+        <section class="panel">
+            <h2>数据来源</h2>
+            <div class="source-tabs">
+                <label><input type="radio" name="sourceMode" value="current" checked> 当前时间 / 位置</label>
+                <label><input type="radio" name="sourceMode" value="manual"> 手动输入</label>
+                <label><input type="radio" name="sourceMode" value="profile"> 人物档案</label>
+            </div>
+            <div id="locationInfo" class="info-box">正在初始化。</div>
+        </section>
+
+        <section id="profilePanel" class="panel hidden">
+            <h2>人物档案</h2>
+            <label>选择档案<select id="profileSelect"></select></label>
+            <label>人物名称<input id="profileName" type="text"></label>
+            <label>备注<textarea id="profileNote" rows="3"></textarea></label>
+            <div class="button-row">
+                <button id="newProfileBtn" type="button">新建</button>
+                <button id="saveProfileBtn" type="button">保存</button>
+                <button id="deleteProfileBtn" type="button" class="danger">删除</button>
+            </div>
+            <p class="muted">保存永远新建一份档案，不会覆盖当前选中的这份；不点"保存"，原档案不受影响。</p>
+        </section>
+
+        <section class="panel">
+            <h2>时间与地点</h2>
+            <label>本地日期时间<input id="localTime" type="datetime-local" step="1"></label>
+            <label>UTC 时区<input id="timezone" type="text" placeholder="+08:00"></label>
+            <label>纬度<input id="latitude" type="number" step="0.000001" min="-90" max="90"></label>
+            <label>经度<input id="longitude" type="number" step="0.000001" min="-180" max="180"></label>
+            <label>海拔（米）<input id="elevation" type="number" step="0.1"></label>
+            <label>气压（hPa）<input id="atpress" type="number" step="0.01"></label>
+            <label>气温（℃）<input id="attemp" type="number" step="0.1"></label>
+            <label>历法
+                <select id="calendar">
+                    <option value="g">Gregorian</option>
+                    <option value="j">Julian</option>
+                </select>
+            </label>
+        </section>
+
+        <section class="panel">
+            <h2>计算设置</h2>
+            <label>黄道体系
+                <select id="eclipticMode">
+                    <option value="tropical">Tropical</option>
+                    <option value="sidereal">Sidereal</option>
+                </select>
+            </label>
+            <label>岁差体系<input id="ayanamshaMode" type="text" value="SIDM_KRISHNAMURTI"></label>
+            <label>月交点
+                <select id="nodeMode">
+                    <option value="mean">Mean Node</option>
+                    <option value="true">True Node</option>
+                </select>
+            </label>
+            <label>宫位制<select id="houseSystem"></select></label>
+            <label class="checkbox-row"><input id="heliocentric" type="checkbox"> 日心制</label>
+            <label class="checkbox-row"><input id="strictEphe" type="checkbox" checked> 严格使用 Swiss Ephemeris 星历文件</label>
+            <label>主行星<select id="selectedPlanets" multiple size="11"></select></label>
+            <label>小行星<select id="selectedMinorPlanets" multiple size="6"></select></label>
+            <label>恒星（每行一个 Swiss Ephemeris 名称）<textarea id="selectedStars" rows="7"></textarea></label>
+
+            <fieldset>
+                <legend>KP 卜卦</legend>
+                <label class="checkbox-row"><input id="horaryActive" type="checkbox"> 启用</label>
+                <label>模式
+                    <select id="horaryMode">
+                        <option value="KS-N">KS-N</option>
+                        <option value="CIL-N">CIL-N</option>
+                    </select>
+                </label>
+                <label>数字<input id="horaryNumber" type="number" value="78" min="1" max="249"></label>
+            </fieldset>
+
+            <label>Dasha 年长度<input id="dashaDaysInYear" type="number" step="0.000001" value="365.25"></label>
+        </section>
+    </aside>
+
+    <section class="content">
+        <div id="errorBox" class="error-box hidden"></div>
+
+        <section class="panel result-panel"><h2>时间地理上下文</h2><div id="contextResult"></div></section>
+        <section class="panel result-panel"><h2>主行星</h2><div id="planetResult"></div></section>
+        <section class="panel result-panel"><h2>小行星</h2><div id="minorPlanetResult"></div></section>
+        <section class="panel result-panel"><h2>恒星</h2><div id="fixedStarResult"></div></section>
+        <section class="panel result-panel"><h2>宫位与四轴</h2><div id="houseResult"></div></section>
+        <section class="panel result-panel"><h2>KP</h2><div id="kpResult"></div></section>
+        <section class="panel result-panel"><h2>日出日落、值日星、行星时</h2><div id="sunResult"></div></section>
+
+        <section class="panel result-panel">
+            <h2>Vimshottari Dasha</h2>
+            <p class="muted">
+                排盘后自动定位并展开到包含"今天"的一支（默认到第 3 层）。
+                点击任意区间可以继续手动展开/收起更深的层级。
+            </p>
+            <div id="dashaResult"></div>
+        </section>
+    </section>
+</main>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
+
+
+########## FILE: user_data\settings.json ##########
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 5000
+  },
+  "default_location": {
+    "latitude": 23.0331389,
+    "longitude": 113.1010556,
+    "timezone": "+08:00",
+    "label": "默认地点"
+  },
+  "birth_defaults": {
+    "elevation": 0.0,
+    "atpress": 1013.25,
+    "attemp": 20.0,
+    "calendar": "g"
+  },
+  "calculation_defaults": {
+    "ecliptic_mode": "tropical",
+    "ayanamsha_mode": "SIDM_KRISHNAMURTI",
+    "node_mode": "mean",
+    "house_system": "Regiomontanus",
+    "heliocentric": false,
+    "strict_ephe": true,
+    "selected_planets": [
+      "Su",
+      "Mo",
+      "Me",
+      "Ve",
+      "Ma",
+      "Ju",
+      "Sa",
+      "Ra",
+      "Ke"
+    ],
+    "selected_minor_planets": [],
+    "selected_stars": [
+      "Algol,bePer",
+      "Alcyone,etTau",
+      "Aldebaran,alTau",
+      "Capella,alAur",
+      "Sirius,alCMa",
+      "Procyon,alCMi",
+      "Regulus,alLeo",
+      "Algorab,deCrv",
+      "Spica,alVir",
+      "Arcturus,alBoo",
+      "Alphecca,alCrB",
+      "Antares,alSco",
+      "Vega,alLyr",
+      "DenebAlgedi,deCap",
+      "Fomalhaut,alPsA"
+    ],
+    "KP_HORARY": {
+      "is_active": false,
+      "mode": "KS-N",
+      "number": 78
+    },
+    "sunrise_rsmi": 256,
+    "dasha_days_in_year": 365.25
+  }
+}
