@@ -4,8 +4,13 @@ const state = {
     settings: null,
     optionsMeta: null,
     results: {},
-    profiles: [],
     profileFields: [],
+    fieldKinds: [],
+    tagOptions: [],
+    profileList: {items: [], page: 1, pageSize: 50, total: 0, totalPages: 1, hasMore: false},
+    profileQuery: {q: "", bornFrom: "", bornTo: "", tags: [], tagMode: "all", sort: "name", order: "asc", page: 1},
+    listToken: 0,
+    selectToken: 0,
     activeProfileId: null,
     sourceMode: "current",
     initialized: false,
@@ -29,7 +34,8 @@ function showError(message) {
     box.classList.remove("hidden");
 }
 
-async function api(url, options = {}) {
+// 返回完整的响应体（除了 data，还有分页列表用的 total / page / has_more 等）。
+async function apiRaw(url, options = {}) {
     const response = await fetch(url, {
         headers: {"Content-Type": "application/json"},
         ...options,
@@ -38,7 +44,11 @@ async function api(url, options = {}) {
     if (!response.ok || !payload.ok) {
         throw new Error(payload.error || `请求失败：HTTP ${response.status}`);
     }
-    return payload.data;
+    return payload;
+}
+
+async function api(url, options = {}) {
+    return (await apiRaw(url, options)).data;
 }
 
 function pad2(n) {
@@ -654,30 +664,343 @@ function switchToManualMode() {
         "手动输入模式：填好时间、时区、经纬度后，点击右上角「排盘」计算。";
 }
 
-function renderProfiles() {
-    const select = $("profileSelect");
-    select.innerHTML = "";
+// ================= 人物档案：分页列表 =================
+// 档案库可能有几万人，所以列表永远只向后端要“一页”（50 人）的基础信息：
+// 名字、出生时间、修改时间、标签。点开某个人时，才去取他的时区、经纬度和全部自定义字段。
 
-    const empty = document.createElement("option");
-    empty.value = "";
-    empty.textContent = "（未选择档案）";
-    select.appendChild(empty);
+const PROFILE_PAGE_SIZE = 50;
 
-    for (const profile of state.profiles) {
-        const option = document.createElement("option");
-        option.value = String(profile.id);
-        option.textContent = profile.display_name;
-        select.appendChild(option);
+const CORE_SORT_OPTIONS = [
+    {value: "name", label: "名字"},
+    {value: "birth", label: "出生时间"},
+    {value: "updated", label: "最近修改"},
+    {value: "created", label: "创建先后"},
+    {value: "latitude", label: "纬度"},
+    {value: "longitude", label: "经度"},
+];
+
+// 出生日期筛选框允许的写法：1980 / 1980-05 / 1980-05-12。
+const BORN_TEXT_RE = /^\d{1,4}(?:[-/.]\d{1,2}){0,2}$/;
+
+function debounce(fn, ms) {
+    let timer = null;
+    return (...args) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn(...args), ms);
+    };
+}
+
+function singleLine(value) {
+    return String(value ?? "").replace(/\s*[\r\n]+\s*/g, " ");
+}
+
+function splitTags(text) {
+    const seen = new Set();
+    const result = [];
+    for (const piece of String(text ?? "").split(/[,，、;；\n]+/)) {
+        const name = piece.trim().replace(/\s+/g, " ");
+        if (!name) continue;
+        const key = name.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.push(name);
     }
+    return result;
+}
 
-    if (state.activeProfileId) {
-        select.value = String(state.activeProfileId);
+function formatBirth(text) {
+    return String(text || "").slice(0, 16);      // 1985-03-04 05:06
+}
+
+function formatDay(isoText) {
+    const date = new Date(isoText);
+    if (Number.isNaN(date.getTime())) return "";
+    return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+}
+
+function hasActiveFilter() {
+    const q = state.profileQuery;
+    return Boolean(q.q.trim() || q.bornFrom.trim() || q.bornTo.trim() || q.tags.length);
+}
+
+function profileListUrl(page) {
+    const q = state.profileQuery;
+    const params = new URLSearchParams();
+    params.set("page", String(page));
+    params.set("page_size", String(PROFILE_PAGE_SIZE));
+    if (q.q.trim()) params.set("q", q.q.trim());
+    if (q.bornFrom.trim()) params.set("born_from", q.bornFrom.trim());
+    if (q.bornTo.trim()) params.set("born_to", q.bornTo.trim());
+    for (const tag of q.tags) params.append("tag", tag);
+    if (q.tags.length > 1) params.set("tag_mode", q.tagMode);
+    params.set("sort", q.sort);
+    params.set("order", q.order);
+    return `/api/profiles?${params.toString()}`;
+}
+
+// payload 的形状和后端 /api/profiles 一致：{data: [...], page, page_size, total, total_pages, has_more}
+function applyProfilePage(payload) {
+    state.profileList = {
+        items: payload.data || [],
+        page: payload.page || 1,
+        pageSize: payload.page_size || PROFILE_PAGE_SIZE,
+        total: payload.total ?? 0,
+        totalPages: payload.total_pages ?? 1,
+        hasMore: Boolean(payload.has_more),
+    };
+    state.profileQuery.page = state.profileList.page;
+    renderProfileList();
+}
+
+async function loadProfileList(page = 1) {
+    const token = ++state.listToken;     // 连续快速操作时，只认最后一次请求的结果
+    $("pagerInfo").textContent = "加载中…";
+    try {
+        const payload = await apiRaw(profileListUrl(page));
+        if (token !== state.listToken) return;
+
+        // 请求的页已经没人了（例如刚删掉这一页的最后一个人）：退回最后一页。
+        if (!payload.data.length && page > 1 && payload.total > 0) {
+            await loadProfileList(payload.total_pages);
+            return;
+        }
+        applyProfilePage(payload);
+    } catch (error) {
+        if (token !== state.listToken) return;
+        showError(error.message);
+        $("pagerInfo").textContent = "加载失败";
     }
 }
 
+// 保存 / 删除之后刷新当前这一页（保持当前的筛选和排序不变）。
 async function refreshProfiles() {
-    state.profiles = await api("/api/profiles");
-    renderProfiles();
+    await loadProfileList(state.profileQuery.page);
+}
+
+function highlightActiveRow() {
+    $("profileList").querySelectorAll(".profile-row").forEach((row) => {
+        row.classList.toggle("active", Number(row.dataset.id) === state.activeProfileId);
+    });
+}
+
+function renderProfileList() {
+    const box = $("profileList");
+    const list = state.profileList;
+    box.innerHTML = "";
+
+    if (!list.items.length) {
+        const empty = document.createElement("p");
+        empty.className = "muted profile-empty";
+        empty.textContent = hasActiveFilter() ? "没有符合条件的档案。" : "还没有档案。";
+        box.appendChild(empty);
+    }
+
+    for (const item of list.items) {
+        const row = document.createElement("div");
+        row.className = "profile-row";
+        row.dataset.id = String(item.id);
+        row.tabIndex = 0;
+        row.setAttribute("role", "option");
+
+        const tags = (item.tags || [])
+            .map((tag) => `<span class="chip small">${escapeHtml(tag)}</span>`)
+            .join("");
+        row.innerHTML = `
+            <div class="profile-row-name">${escapeHtml(item.display_name)}</div>
+            <div class="profile-row-meta">出生 ${escapeHtml(formatBirth(item.birth_time))} · 修改 ${escapeHtml(formatDay(item.updated_at))}</div>
+            ${tags ? `<div class="chips">${tags}</div>` : ""}
+        `;
+
+        const open = async () => {
+            try {
+                await selectProfile(item.id);
+            } catch (error) {
+                showError(error.message);
+            }
+        };
+        row.addEventListener("click", open);
+        row.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                open();
+            }
+        });
+        box.appendChild(row);
+    }
+
+    $("pagerInfo").textContent = `第 ${list.page} / ${list.totalPages} 页 · 共 ${list.total} 人`;
+    $("prevPageBtn").disabled = list.page <= 1;
+    $("nextPageBtn").disabled = !list.hasMore;
+    highlightActiveRow();
+}
+
+// 排序下拉框：固定的几项 + 每个“数字”类型的自定义字段。
+function renderSortOptions() {
+    const options = [...CORE_SORT_OPTIONS];
+    for (const field of state.profileFields) {
+        if (field.kind === "number") {
+            options.push({value: `field:${field.id}`, label: `${field.label}（数字）`});
+        }
+    }
+    // 正在用来排序的字段被删掉了、或不再是数字类型：退回按名字排序。
+    if (!options.some((o) => o.value === state.profileQuery.sort)) {
+        state.profileQuery.sort = "name";
+    }
+    fillSelect($("sortSelect"), options);
+    $("sortSelect").value = state.profileQuery.sort;
+}
+
+// ---------- 标签 ----------
+
+async function refreshTagOptions() {
+    try {
+        state.tagOptions = await api("/api/tags?limit=500");
+    } catch (_) {
+        return;
+    }
+    renderTagDatalist();
+    renderTagSuggest();
+}
+
+function renderTagDatalist() {
+    const list = $("tagDatalist");
+    list.innerHTML = "";
+    for (const tag of state.tagOptions) {
+        const option = document.createElement("option");
+        option.value = tag.name;
+        option.label = `${tag.profile_count} 人`;
+        list.appendChild(option);
+    }
+}
+
+// 编辑区下方的“常用标签”：点一下加上 / 去掉。
+function renderTagSuggest() {
+    const box = $("profileTagSuggest");
+    box.innerHTML = "";
+    const current = new Set(splitTags($("profileTags").value).map((t) => t.toLowerCase()));
+    for (const tag of state.tagOptions.slice(0, 12)) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "chip" + (current.has(tag.name.toLowerCase()) ? " selected" : "");
+        chip.textContent = tag.name;
+        chip.addEventListener("click", () => {
+            const tags = splitTags($("profileTags").value);
+            const index = tags.findIndex((t) => t.toLowerCase() === tag.name.toLowerCase());
+            if (index >= 0) tags.splice(index, 1);
+            else tags.push(tag.name);
+            $("profileTags").value = tags.join(", ");
+            renderTagSuggest();
+        });
+        box.appendChild(chip);
+    }
+}
+
+function renderFilterChips() {
+    const box = $("filterTagChips");
+    box.innerHTML = "";
+    for (const tag of state.profileQuery.tags) {
+        const chip = document.createElement("span");
+        chip.className = "chip selected";
+        chip.append(tag);
+
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "chip-x";
+        remove.textContent = "×";
+        remove.title = "取消这个标签筛选";
+        remove.addEventListener("click", () => {
+            state.profileQuery.tags = state.profileQuery.tags.filter((t) => t !== tag);
+            renderFilterChips();
+            loadProfileList(1);
+        });
+        chip.appendChild(remove);
+        box.appendChild(chip);
+    }
+    $("tagModeSelect").classList.toggle("hidden", state.profileQuery.tags.length < 2);
+}
+
+function resetProfileFilters() {
+    Object.assign(state.profileQuery, {
+        q: "", bornFrom: "", bornTo: "", tags: [], tagMode: "all", sort: "name", order: "asc",
+    });
+    $("profileSearch").value = "";
+    $("bornFrom").value = "";
+    $("bornTo").value = "";
+    $("filterTagInput").value = "";
+    $("tagModeSelect").value = "all";
+    $("orderSelect").value = "asc";
+    $("bornFrom").classList.remove("invalid");
+    $("bornTo").classList.remove("invalid");
+    renderSortOptions();
+    renderFilterChips();
+    loadProfileList(1);
+}
+
+function bindProfileBrowser() {
+    const reload = debounce(() => loadProfileList(1), 300);
+
+    $("profileSearch").addEventListener("input", () => {
+        state.profileQuery.q = $("profileSearch").value;
+        reload();
+    });
+
+    for (const [id, key] of [["bornFrom", "bornFrom"], ["bornTo", "bornTo"]]) {
+        $(id).addEventListener("input", () => {
+            const text = $(id).value.trim();
+            const valid = text === "" || BORN_TEXT_RE.test(text);
+            $(id).classList.toggle("invalid", !valid);
+            if (!valid) return;              // 还没敲完（如 “1980-”）：先不查询，免得弹出报错
+            state.profileQuery[key] = text;
+            reload();
+        });
+    }
+
+    $("filterTagInput").addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        const added = splitTags($("filterTagInput").value);
+        $("filterTagInput").value = "";
+        let changed = false;
+        for (const name of added) {
+            if (!state.profileQuery.tags.some((t) => t.toLowerCase() === name.toLowerCase())) {
+                state.profileQuery.tags.push(name);
+                changed = true;
+            }
+        }
+        if (changed) {
+            renderFilterChips();
+            loadProfileList(1);
+        }
+    });
+
+    $("tagModeSelect").addEventListener("change", () => {
+        state.profileQuery.tagMode = $("tagModeSelect").value;
+        loadProfileList(1);
+    });
+    $("sortSelect").addEventListener("change", () => {
+        state.profileQuery.sort = $("sortSelect").value;
+        loadProfileList(1);
+    });
+    $("orderSelect").addEventListener("change", () => {
+        state.profileQuery.order = $("orderSelect").value;
+        loadProfileList(1);
+    });
+    $("resetFiltersBtn").addEventListener("click", resetProfileFilters);
+
+    $("prevPageBtn").addEventListener("click", () => loadProfileList(state.profileList.page - 1));
+    $("nextPageBtn").addEventListener("click", () => loadProfileList(state.profileList.page + 1));
+    $("pageJump").addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        const wanted = Math.floor(Number($("pageJump").value));
+        if (!wanted) return;
+        const page = Math.max(1, Math.min(wanted, state.profileList.totalPages));
+        $("pageJump").value = "";
+        loadProfileList(page);
+    });
+
+    // 编辑区的标签输入框手动改了，常用标签的高亮要跟着变。
+    $("profileTags").addEventListener("input", renderTagSuggest);
 }
 
 // ---------- 自定义字段：表单里的输入框 ----------
@@ -688,14 +1011,19 @@ function renderProfileCustomFields(preserved = null) {
     box.innerHTML = "";
 
     for (const field of state.profileFields) {
-        const label = document.createElement("label");
-        label.textContent = field.label;
+        const isNumber = field.kind === "number";
 
-        const input = document.createElement(field.multiline ? "textarea" : "input");
-        if (field.multiline) input.rows = 3;
-        else input.type = "text";
+        const label = document.createElement("label");
+        label.textContent = isNumber ? `${field.label}（数字）` : field.label;
+
+        const input = document.createElement("input");
+        input.type = "text";
+        if (isNumber) {
+            input.inputMode = "decimal";
+            input.placeholder = "数字，如 12、-3.5";
+        }
         input.dataset.fieldId = String(field.id);
-        input.value = preserved?.[field.id] ?? "";
+        input.value = singleLine(preserved?.[field.id]);     // 字段都是单行的，旧数据里的换行显示成空格
 
         label.appendChild(input);
         box.appendChild(label);
@@ -712,18 +1040,24 @@ function collectProfileFields() {
 
 function loadProfileIntoForm(profile) {
     $("profileName").value = profile.display_name || "";
+    $("profileTags").value = (profile.tags || []).join(", ");
     renderProfileCustomFields(profile.fields || {});
+    renderTagSuggest();
     $("localTime").value = String(profile.birth_time || "").replace(" ", "T");
     $("timezone").value = profile.timezone_offset || "";
     $("latitude").value = profile.latitude ?? "";
     $("longitude").value = profile.longitude ?? "";
 }
 
+// 点开某个人：这时才去取他的完整信息（时区、经纬度、全部自定义字段）。
 async function selectProfile(profileId) {
     if (!profileId) return;
+    const token = ++state.selectToken;
     const profile = await api(`/api/profiles/${profileId}`);
+    if (token !== state.selectToken) return;     // 期间又点了别的人：只认最后一次点击
     state.activeProfileId = profile.id;
     loadProfileIntoForm(profile);
+    highlightActiveRow();
     await calculateFull();
 }
 
@@ -734,15 +1068,26 @@ function profilePayload() {
         timezone_offset: $("timezone").value.trim(),
         latitude: Number($("latitude").value),
         longitude: Number($("longitude").value),
+        tags: splitTags($("profileTags").value),
         fields: collectProfileFields(),
     };
 }
 
 function clearProfileForm() {
     state.activeProfileId = null;
-    $("profileSelect").value = "";
     $("profileName").value = "";
+    $("profileTags").value = "";
     renderProfileCustomFields(null);
+    renderTagSuggest();
+    highlightActiveRow();
+}
+
+// 保存 / 新建成功后：把服务器整理过的结果（标签去重等）写回表单，并刷新列表和标签。
+async function afterProfileSaved(saved) {
+    state.activeProfileId = saved.id;
+    $("profileTags").value = (saved.tags || []).join(", ");
+    await Promise.all([refreshProfiles(), refreshTagOptions()]);
+    highlightActiveRow();
 }
 
 // 「新建」：把当前表单里的内容存成一份全新的档案，并切换到这份新档案。
@@ -757,22 +1102,21 @@ async function createProfileFromForm() {
         return;
     }
 
-    const sameName = state.profiles.some(
-        (p) => String(p.display_name).trim().toLowerCase() === payload.display_name.toLowerCase()
-    );
-    if (sameName && !confirm(`已经有一份叫「${payload.display_name}」的档案了，仍要再新建一份吗？`)) {
-        return;
-    }
-
     try {
         showError("");
+        // 列表已经不是全量加载的了，同名检查交给后端。
+        const check = await api(
+            `/api/profiles/check-name?name=${encodeURIComponent(payload.display_name)}`
+        );
+        if (check.count > 0 && !confirm(`已经有 ${check.count} 份叫「${payload.display_name}」的档案了，仍要再新建一份吗？`)) {
+            return;
+        }
+
         const saved = await api("/api/profiles", {
             method: "POST",
             body: JSON.stringify(payload),
         });
-        state.activeProfileId = saved.id;
-        await refreshProfiles();
-        $("profileSelect").value = String(saved.id);
+        await afterProfileSaved(saved);
         setStatus(`已新建档案「${saved.display_name}」`);
     } catch (error) {
         showError(error.message);
@@ -782,7 +1126,7 @@ async function createProfileFromForm() {
 // 「保存」：用当前表单内容直接覆盖当前选中的那份档案。
 async function saveActiveProfile() {
     if (!state.activeProfileId) {
-        showError("当前没有选中的档案，无法覆盖保存。请先在上方选择一份档案，或点击「新建」把当前内容存成新档案。");
+        showError("当前没有选中的档案，无法覆盖保存。请先在上方列表里点选一份档案，或点击「新建」把当前内容存成新档案。");
         return;
     }
     if (!formComplete()) {
@@ -796,8 +1140,7 @@ async function saveActiveProfile() {
             method: "PUT",
             body: JSON.stringify(profilePayload()),
         });
-        await refreshProfiles();
-        $("profileSelect").value = String(saved.id);
+        await afterProfileSaved(saved);
         setStatus(`已覆盖保存「${saved.display_name}」`);
     } catch (error) {
         showError(error.message);
@@ -805,19 +1148,7 @@ async function saveActiveProfile() {
 }
 
 function bindProfileActions() {
-    $("profileSelect").addEventListener("change", async () => {
-        const id = Number($("profileSelect").value);
-        if (!id) {
-            // 选回"未选择"：只取消选中，表单里的内容保留，方便改一改再「新建」。
-            state.activeProfileId = null;
-            return;
-        }
-        try {
-            await selectProfile(id);
-        } catch (error) {
-            showError(error.message);
-        }
-    });
+    bindProfileBrowser();
 
     $("newProfileBtn").addEventListener("click", createProfileFromForm);
     $("saveProfileBtn").addEventListener("click", saveActiveProfile);
@@ -832,7 +1163,7 @@ function bindProfileActions() {
                 method: "DELETE",
             });
             clearProfileForm();
-            await refreshProfiles();
+            await Promise.all([refreshProfiles(), refreshTagOptions()]);
             setStatus("档案已删除");
         } catch (error) {
             showError(error.message);
@@ -842,13 +1173,19 @@ function bindProfileActions() {
     bindFieldManager();
 }
 
-// ---------- 自定义字段：管理（增 / 改名 / 删） ----------
+// ---------- 自定义字段：管理（增 / 改名 / 改类型 / 删） ----------
 
 async function reloadProfileFields() {
     const preserved = collectProfileFields();   // 保住已经敲进去、还没保存的内容
     state.profileFields = await api("/api/profile-fields");
     renderProfileCustomFields(preserved);
     renderFieldManager();
+
+    const sortBefore = state.profileQuery.sort;
+    renderSortOptions();
+    if (sortBefore !== state.profileQuery.sort) {
+        await loadProfileList(1);               // 排序用的字段没了，列表已退回按名字排序
+    }
 }
 
 function renderFieldManager() {
@@ -883,24 +1220,30 @@ function renderFieldManager() {
             }
         });
 
-        const multiLabel = document.createElement("label");
-        const multi = document.createElement("input");
-        multi.type = "checkbox";
-        multi.checked = field.multiline;
-        multi.addEventListener("change", async () => {
+        const kind = document.createElement("select");
+        fillSelect(kind, state.fieldKinds);
+        kind.value = field.kind;
+        kind.title = "字段类型";
+        kind.addEventListener("change", async () => {
             try {
                 showError("");
-                await api(`/api/profile-fields/${field.id}`, {
+                const saved = await api(`/api/profile-fields/${field.id}`, {
                     method: "PUT",
-                    body: JSON.stringify({multiline: multi.checked}),
+                    body: JSON.stringify({kind: kind.value}),
                 });
                 await reloadProfileFields();
+                setStatus(`字段「${saved.label}」已改为${saved.kind_label}类型`);
+                if (saved.unparsed_count) {
+                    showError(
+                        `字段「${saved.label}」已改为数字类型，但有 ${saved.unparsed_count} 份档案里这一项的内容无法识别为数字：` +
+                        `原文都还在，只是不参与排序；之后保存这些档案时，需要先把这一项改成数字或清空。`
+                    );
+                }
             } catch (error) {
                 showError(error.message);
-                multi.checked = field.multiline;
+                kind.value = field.kind;
             }
         });
-        multiLabel.append(multi, " 多行");
 
         const del = document.createElement("button");
         del.type = "button";
@@ -908,7 +1251,7 @@ function renderFieldManager() {
         del.textContent = "删除";
         del.addEventListener("click", () => deleteField(field));
 
-        row.append(name, multiLabel, del);
+        row.append(name, kind, del);
         box.appendChild(row);
     }
 }
@@ -922,10 +1265,9 @@ async function addField() {
         showError("");
         await api("/api/profile-fields", {
             method: "POST",
-            body: JSON.stringify({label, multiline: $("newFieldMultiline").checked}),
+            body: JSON.stringify({label, kind: $("newFieldKind").value}),
         });
         input.value = "";
-        $("newFieldMultiline").checked = false;
         await reloadProfileFields();
         setStatus(`已为所有档案添加字段「${label}」`);
     } catch (error) {
@@ -979,7 +1321,7 @@ function bindModeSwitching() {
                 state.sourceMode = "profile";
                 updateModeUI();
                 $("locationInfo").textContent =
-                    "人物档案模式：选择档案后立即排盘；之后如果修改了数值，需要重新点击「排盘」才会用新数值计算。";
+                    "人物档案模式：在档案列表里点选一个人后立即排盘；之后如果修改了数值，需要重新点击「排盘」才会用新数值计算。";
             }
         });
     });
@@ -992,8 +1334,9 @@ async function init() {
 
         state.settings = bootstrap.settings;
         state.optionsMeta = bootstrap.options;
-        state.profiles = bootstrap.profiles;
         state.profileFields = bootstrap.profile_fields || [];
+        state.fieldKinds = bootstrap.field_kinds || [{value: "text", label: "文本"}, {value: "number", label: "数字"}];
+        state.tagOptions = bootstrap.tags || [];
 
         fillSelect($("houseSystem"), state.optionsMeta.house_systems);
         fillSelect($("ayanamshaMode"), state.optionsMeta.ayanamsha_modes);
@@ -1002,7 +1345,13 @@ async function init() {
         setFormFromDefaults();
         updateHoraryRange();
         $("horaryMode").addEventListener("change", updateHoraryRange);
-        renderProfiles();
+        fillSelect($("newFieldKind"), state.fieldKinds);
+        renderSortOptions();
+        renderFilterChips();
+        renderTagDatalist();
+        renderTagSuggest();
+        // 启动时后端只给第一页（50 人）的基础信息，不会把整个档案库读进来。
+        applyProfilePage({data: bootstrap.profiles, ...bootstrap.profiles_page});
         renderProfileCustomFields();
         renderFieldManager();
 
@@ -1019,3 +1368,5 @@ async function init() {
 }
 
 window.addEventListener("DOMContentLoaded", init);
+
+

@@ -78,7 +78,7 @@ from __future__ import annotations
 from pathlib import Path
 from flask import Flask, jsonify, render_template, request
 
-from profile_db import ProfileDB
+from profile_db import FIELD_KINDS, ProfileDB
 from web_bridge import (
     DEFAULT_SETTINGS,
     calculate_full_chart,
@@ -99,8 +99,15 @@ app = Flask(
 )
 app.config["JSON_AS_ASCII"] = False
 
+# Flask 默认会把返回的 JSON 的键按字母序重排：行星会变成 Ke, Ma, Me, Mo, Ra…，
+# 宫头会变成 house 1, house 10, house 11, house 12, house 2…，
+# 后端按计算顺序排好的行序到了页面上就全乱了。关掉后，表格行序 = 后端的计算顺序。
+app.json.sort_keys = False
+
 settings = load_settings(BASE_DIR / "user_data" / "settings.json")
 profile_db = ProfileDB(BASE_DIR / "user_data" / "people.sqlite3")
+
+PAGE_META_KEYS = ("page", "page_size", "total", "total_pages", "has_more", "sort", "order")
 
 
 def ok(data=None, **extra):
@@ -115,6 +122,44 @@ def fail(message, status=400):
     return jsonify({"ok": False, "error": str(message)}), status
 
 
+def field_kind_options():
+    return [{"value": key, "label": label} for key, label in FIELD_KINDS.items()]
+
+
+def profile_list_args():
+    """把 URL 查询参数整理成 ProfileDB.list_profiles 的参数（取值是否合法由 ProfileDB 校验）。
+
+    例：/api/profiles?page=2&page_size=50&q=李&tag=名人&tag=KP&tag_mode=all
+                    &born_from=1980&born_to=1989&sort=birth&order=desc
+        /api/profiles?sort=field:3&order=desc            按 3 号字段的数值从大到小
+        /api/profiles?num_field=3&num_min=10&num_max=20  3 号字段数值在 10~20 之间
+    """
+    args = request.args
+    tags = args.getlist("tag")
+    if args.get("tags"):
+        tags.append(args["tags"])            # 也接受 tags=名人,KP
+    return {
+        "page": args.get("page"),
+        "page_size": args.get("page_size"),
+        "q": args.get("q"),
+        "tags": tags,
+        "tag_mode": args.get("tag_mode", "all"),
+        "born_from": args.get("born_from"),
+        "born_to": args.get("born_to"),
+        "sort": args.get("sort", "name"),
+        "order": args.get("order", "asc"),
+        "num_field": args.get("num_field"),
+        "num_min": args.get("num_min"),
+        "num_max": args.get("num_max"),
+        "with_total": args.get("with_total", "1").strip().lower() not in ("0", "false", "no"),
+    }
+
+
+def page_response(page):
+    """列表接口：data 是当前页的人物（轻量），分页信息放在同级的 page / total / has_more 等键里。"""
+    return ok(page["items"], **{key: page[key] for key in PAGE_META_KEYS})
+
+
 @app.get("/")
 def index():
     return render_template("index.html")
@@ -122,10 +167,16 @@ def index():
 
 @app.get("/api/bootstrap")
 def bootstrap():
+    # 启动时只带第一页（50 人）的轻量信息，不再把整个档案库读进来。
+    first_page = profile_db.list_profiles()
     data = {
         "settings": settings,
         "options": public_options(),
-        "profiles": profile_db.list_profiles(),
+        "profiles": first_page["items"],
+        "profiles_page": {key: first_page[key] for key in PAGE_META_KEYS},
+        "profile_fields": profile_db.list_fields(),
+        "field_kinds": field_kind_options(),
+        "tags": profile_db.list_tags(limit=100),
     }
     return ok(data, **data)
 
@@ -167,13 +218,29 @@ def dasha_expand():
         return fail(exc, 400)
 
 
+# ---------------------------------------------------------------- 人物档案
+
 @app.get("/api/profiles")
 def list_profiles():
-    return ok(profile_db.list_profiles())
+    try:
+        return page_response(profile_db.list_profiles(**profile_list_args()))
+    except ValueError as exc:
+        return fail(exc, 400)
+    except Exception as exc:
+        app.logger.exception("Profile listing failed")
+        return fail(exc, 500)
+
+
+@app.get("/api/profiles/check-name")
+def check_profile_name():
+    """新建前检查有没有同名档案（列表不再全量加载，前端没法再自己在内存里比对）。"""
+    count = profile_db.count_name(request.args.get("name", ""), request.args.get("exclude_id"))
+    return ok({"count": count})
 
 
 @app.get("/api/profiles/<int:profile_id>")
 def get_profile(profile_id):
+    # 只有点开具体某个人时才会走到这里：返回出生细节 + 全部自定义字段 + 标签。
     item = profile_db.get_profile(profile_id)
     if item is None:
         return fail("人物档案不存在。", 404)
@@ -208,6 +275,52 @@ def delete_profile(profile_id):
     return ok({"deleted": profile_id})
 
 
+# ---------------------------------------------------------------- 分类标签
+
+@app.get("/api/tags")
+def list_tags():
+    try:
+        return ok(profile_db.list_tags(request.args.get("q"), request.args.get("limit", 200)))
+    except ValueError as exc:
+        return fail(exc, 400)
+
+
+# ---------------------------------------------------------------- 自定义字段
+
+@app.get("/api/profile-fields")
+def list_profile_fields():
+    return ok(profile_db.list_fields())
+
+
+@app.post("/api/profile-fields")
+def create_profile_field():
+    try:
+        payload = request.get_json(force=True) or {}
+        return ok(profile_db.create_field(payload.get("label"), payload.get("kind") or "text"))
+    except Exception as exc:
+        return fail(exc, 400)
+
+
+@app.put("/api/profile-fields/<int:field_id>")
+def update_profile_field(field_id):
+    try:
+        payload = request.get_json(force=True) or {}
+        item = profile_db.update_field(field_id, payload)
+        if item is None:
+            return fail("字段不存在。", 404)
+        return ok(item)
+    except Exception as exc:
+        return fail(exc, 400)
+
+
+@app.delete("/api/profile-fields/<int:field_id>")
+def delete_profile_field(field_id):
+    # 同时删除所有档案里这个字段的数据（数据库外键级联）。
+    if not profile_db.delete_field(field_id):
+        return fail("字段不存在。", 404)
+    return ok({"deleted": field_id})
+
+
 if __name__ == "__main__":
     host = str(settings.get("server", {}).get("host", DEFAULT_SETTINGS["server"]["host"]))
     port = int(settings.get("server", {}).get("port", DEFAULT_SETTINGS["server"]["port"]))
@@ -223,63 +336,436 @@ if __name__ == "__main__":
 ########## FILE: profile_db.py ##########
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+import math
+import re
 import sqlite3
+import unicodedata
 
+# 必备字段（人名、时间、地点）直接是 people 表的列，不属于“自定义字段”，
+# 因此既不能被删除，也不允许用同名标签再建一个自定义字段。
+CORE_FIELD_LABELS = {
+    "人物名称", "人物姓名", "姓名", "名称",
+    "出生时间", "时间", "本地时间", "时区", "UTC 时区",
+    "纬度", "经度", "地点", "出生地点",
+}
+
+MAX_LABEL_LEN = 40
+MAX_VALUE_LEN = 20000
+MAX_TAG_LEN = 30
+MAX_TAGS_PER_PROFILE = 20
+
+SCHEMA_VERSION = 3
+
+DEFAULT_PAGE_SIZE = 50
+MAX_PAGE_SIZE = 200
+
+# 自定义字段只有两种类型：
+#   text    文本（单行）。只存原文，不建任何检索。
+#   number  数字。除了保留用户输入的原文（value），还会解析出一个数值存进 num_value，
+#           并建 (字段, 数值) 索引——排序和范围筛选走这个数值，而不是比较文本。
+# 数据库里只放“人物相关的数据标签”和“排盘必要的要素”，
+# 不记录星座、度数之类的星盘结果，所以没有度数/星座这类字段类型。
+FIELD_KINDS = {
+    "text": "文本",
+    "number": "数字",
+}
+NUMERIC_KINDS = frozenset({"number"})
+
+
+# ====================================================================== 解析工具
+# 这些都是不依赖数据库的纯函数：把用户敲进去的文本，变成可以按大小比较的数字。
+
+def _norm(text):
+    """全角→半角、统一负号，并去掉首尾空白。"""
+    s = unicodedata.normalize("NFKC", str(text))
+    return s.replace("\u2212", "-").replace("\u2013", "-").strip()
+
+
+_THOUSANDS_RE = re.compile(r"[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?")
+_NUM_RE = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
+
+
+def parse_number(text):
+    """"12" "-3.5" "1,024" "１２" → 数字；其他写法（含 nan/inf）一律视为无法识别。"""
+    s = _norm(text)
+    if not s:
+        return None
+    if _THOUSANDS_RE.fullmatch(s):
+        s = s.replace(",", "")
+    if not _NUM_RE.fullmatch(s):
+        return None
+    value = float(s)
+    return value if math.isfinite(value) else None
+
+
+def parse_birth_time(text):
+    """出生时间文本 → (YYYYMMDD 整数, 当天第几秒)；无法识别或带时区则返回 None。"""
+    try:
+        parsed = datetime.fromisoformat(str(text).strip().replace("T", " "))
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        return None
+    return (
+        parsed.year * 10000 + parsed.month * 100 + parsed.day,
+        parsed.hour * 3600 + parsed.minute * 60 + parsed.second,
+    )
+
+
+def derive_num(kind, text):
+    """按字段类型把原文解析成数值；非数值类型或无法识别时返回 None。"""
+    return parse_number(text) if kind == "number" else None
+
+
+_PERIOD_RE = re.compile(r"^\s*(\d{1,4})(?:\s*[-/.]\s*(\d{1,2}))?(?:\s*[-/.]\s*(\d{1,2}))?\s*$")
+
+
+def period_bound(text, *, end):
+    """出生日期筛选的边界：'1980' / '1980-05' / '1980-05-12' → YYYYMMDD 整数。
+
+    作为起点取这段时间的第一天，作为终点取最后一天，所以
+    born_from=1980 & born_to=1989 就是“1980 年初到 1989 年底”。
+    """
+    m = _PERIOD_RE.match(_norm(text))
+    if not m:
+        raise ValueError(f"日期筛选格式不对：{text!r}，请用 1980、1980-05 或 1980-05-12。")
+    year = int(m.group(1))
+    month = int(m.group(2)) if m.group(2) else None
+    day = int(m.group(3)) if m.group(3) else None
+    if month is not None and not 1 <= month <= 12:
+        raise ValueError(f"日期筛选里的月份不对：{text!r}")
+    if day is not None and not 1 <= day <= 31:
+        raise ValueError(f"日期筛选里的日不对：{text!r}")
+    if end:
+        return year * 10000 + (month or 12) * 100 + (day or 31)
+    return year * 10000 + (month or 1) * 100 + (day or 1)
+
+
+# ======================================================================= 数据库
 
 class ProfileDB:
+    """人物档案库。
+
+    表结构（schema v3）：
+      people          必备字段：名称、出生时间、时区、纬度、经度、创建/更新时间；
+                      另有两个由出生时间派生出来的整数列 birth_ymd / birth_tod，
+                      用来做按年份/日期范围筛选和按出生先后排序。
+      profile_fields  自定义字段的“定义”（字段名、类型 kind：文本 / 数字）
+      profile_values  每个人在每个自定义字段上的“取值”：
+                        value      用户输入的原文
+                        num_value  数字类型解析出的数值（文本类型为 NULL）
+      tags            分类标签（名称唯一，不分大小写）
+      people_tags     人物 ↔ 标签（多对多）
+
+    索引原则：
+      建索引：人名、出生日期、修改时间、纬度/经度、(字段, 数值)、(标签, 人物)。
+      不建索引：profile_values.value —— 文本原文就存在这一列，没有任何索引会包含它，
+      所以文字再多也不会撑大索引；列表查询根本不会去碰这一列。
+
+    增加字段 = 在 profile_fields 里加一行，所有档案立刻拥有该字段（值为空）。
+    删除字段 = 删掉 profile_fields 里的那一行，profile_values 里所有人的这一项
+    由外键 ON DELETE CASCADE 一并删除，不需要逐个档案处理。
+    """
+
     def __init__(self, path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
+    # ------------------------------------------------------------------ 连接
+
     def _connect(self):
         conn = sqlite3.connect(
             self.path,
             timeout=5.0,
-            isolation_level=None,
+            isolation_level=None,  # 自动提交模式；需要事务时手动 BEGIN/COMMIT
         )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = DELETE")
         conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA temp_store = MEMORY")
+        conn.execute("PRAGMA cache_size = -16384")  # 每个连接最多 16 MB 页缓存
         return conn
 
+    @contextmanager
+    def _read(self):
+        conn = self._connect()
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    @contextmanager
+    def _tx(self):
+        """写事务：成功则提交，任何异常则整体回滚，并保证连接被关闭。"""
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield conn
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+            else:
+                conn.execute("COMMIT")
+                try:
+                    # 让 SQLite 在需要时自己刷新统计信息（通常什么也不做，很便宜）。
+                    conn.execute("PRAGMA optimize")
+                except sqlite3.Error:
+                    pass
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------ 建表 / 迁移
+
+    _PEOPLE_DDL = """
+        CREATE TABLE {name} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            display_name TEXT NOT NULL,
+            birth_time TEXT NOT NULL,
+            timezone_offset TEXT NOT NULL,
+            latitude REAL NOT NULL,
+            longitude REAL NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            birth_ymd INTEGER,
+            birth_tod INTEGER
+        )
+    """
+
+    _INDEXES = (
+        "CREATE INDEX IF NOT EXISTS idx_people_display_name "
+        "ON people(display_name COLLATE NOCASE)",
+        "CREATE INDEX IF NOT EXISTS idx_people_birth "
+        "ON people(birth_ymd, birth_tod)",
+        "CREATE INDEX IF NOT EXISTS idx_people_updated "
+        "ON people(updated_at)",
+        "CREATE INDEX IF NOT EXISTS idx_people_latitude "
+        "ON people(latitude)",
+        "CREATE INDEX IF NOT EXISTS idx_people_longitude "
+        "ON people(longitude)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_profile_fields_label "
+        "ON profile_fields(label COLLATE NOCASE)",
+        # 同时服务：按字段数值排序/筛选、统计某字段被多少人填过、删除字段时的级联清理。
+        "CREATE INDEX IF NOT EXISTS idx_pv_field_num "
+        "ON profile_values(field_id, num_value)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_name "
+        "ON tags(name COLLATE NOCASE)",
+        "CREATE INDEX IF NOT EXISTS idx_people_tags_tag "
+        "ON people_tags(tag_id, profile_id)",
+    )
+
+    def _db_state(self):
+        """返回 (people 表现有的列名列表, PRAGMA user_version)。"""
+        with self._read() as conn:
+            columns = [row["name"] for row in conn.execute("PRAGMA table_info(people)")]
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        return columns, version
+
     def _init_db(self):
-        with self._connect() as conn:
+        columns, version = self._db_state()
+        existing = bool(columns)
+        legacy_notes = self._read_legacy_notes() if "note" in columns else None
+
+        # 已有数据的库在改结构之前，先整库另存一份。
+        if legacy_notes is not None:
+            self._backup_before_migration("before-fields")
+        elif existing and version < SCHEMA_VERSION:
+            self._backup_before_migration(f"before-v{SCHEMA_VERSION}")
+
+        with self._tx() as conn:
+            if legacy_notes is not None:
+                # 旧版 people 表带有固定的 note 列：重建为只含必备字段的新表。
+                # 此时 profile_values 还不存在，所以 DROP 旧表不会触发级联删除。
+                conn.execute(self._PEOPLE_DDL.format(name="people_new"))
+                conn.execute(
+                    """
+                    INSERT INTO people_new (
+                        id, display_name, birth_time, timezone_offset,
+                        latitude, longitude, created_at, updated_at
+                    )
+                    SELECT id, display_name, birth_time, timezone_offset,
+                           latitude, longitude, created_at, updated_at
+                    FROM people
+                    """
+                )
+                conn.execute("DROP TABLE people")
+                conn.execute("ALTER TABLE people_new RENAME TO people")
+
+            conn.execute(self._PEOPLE_DDL.format(name="IF NOT EXISTS people"))
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS people (
+                CREATE TABLE IF NOT EXISTS profile_fields (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    display_name TEXT NOT NULL,
-                    birth_time TEXT NOT NULL,
-                    timezone_offset TEXT NOT NULL,
-                    latitude REAL NOT NULL,
-                    longitude REAL NOT NULL,
-                    note TEXT NOT NULL DEFAULT '',
+                    label TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    kind TEXT NOT NULL DEFAULT 'text'
                 )
                 """
             )
             conn.execute(
                 """
-                CREATE INDEX IF NOT EXISTS idx_people_display_name
-                ON people(display_name COLLATE NOCASE)
+                CREATE TABLE IF NOT EXISTS profile_values (
+                    profile_id INTEGER NOT NULL
+                        REFERENCES people(id) ON DELETE CASCADE,
+                    field_id INTEGER NOT NULL
+                        REFERENCES profile_fields(id) ON DELETE CASCADE,
+                    value TEXT NOT NULL,
+                    num_value REAL,
+                    PRIMARY KEY (profile_id, field_id)
+                )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tags (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS people_tags (
+                    profile_id INTEGER NOT NULL
+                        REFERENCES people(id) ON DELETE CASCADE,
+                    tag_id INTEGER NOT NULL
+                        REFERENCES tags(id) ON DELETE CASCADE,
+                    PRIMARY KEY (profile_id, tag_id)
+                ) WITHOUT ROWID
+                """
+            )
+
+            # 旧版已存在的表：补上 v2 新增的列。
+            self._ensure_column(conn, "people", "birth_ymd", "INTEGER")
+            self._ensure_column(conn, "people", "birth_tod", "INTEGER")
+            self._ensure_column(conn, "profile_fields", "kind", "TEXT NOT NULL DEFAULT 'text'")
+            self._ensure_column(conn, "profile_values", "num_value", "REAL")
+
+            if legacy_notes is not None:
+                # 把原来的“备注”变成第一个自定义字段，并迁移已有内容。
+                cursor = conn.execute(
+                    "INSERT INTO profile_fields (label, created_at, kind) "
+                    "VALUES (?, ?, 'text')",
+                    ("备注", self._now()),
+                )
+                field_id = int(cursor.lastrowid)
+                for profile_id, note in legacy_notes:
+                    if note and str(note).strip():
+                        conn.execute(
+                            "INSERT INTO profile_values (profile_id, field_id, value) "
+                            "VALUES (?, ?, ?)",
+                            (profile_id, field_id, str(note)),
+                        )
+
+            self._migrate(conn, version)
+
+            for ddl in self._INDEXES:
+                conn.execute(ddl)
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+        if version < SCHEMA_VERSION:
+            # 刚建好/刚迁移完的库：采集一次统计信息，让查询计划从第一天起就是对的。
+            with self._read() as conn:
+                conn.execute("ANALYZE")
+
+    @staticmethod
+    def _ensure_column(conn, table, column, ddl):
+        columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+    @staticmethod
+    def _migrate(conn, version):
+        """把旧版本的数据补齐/整理到当前结构（只在 user_version 低于当前版本时执行）。"""
+        if version < 2:
+            # 由出生时间文本派生出整数日期，之后按年份筛选/排序都走整数索引。
+            batch = []
+            for row in conn.execute("SELECT id, birth_time FROM people"):
+                parsed = parse_birth_time(row["birth_time"])
+                ymd, tod = parsed if parsed else (None, None)
+                batch.append((ymd, tod, int(row["id"])))
+            conn.executemany(
+                "UPDATE people SET birth_ymd = ?, birth_tod = ? WHERE id = ?", batch
+            )
+
+        if version < 3:
+            # v3 只保留“文本 / 数字”两种字段类型，并彻底去掉“多行”。
+            # 旧的 多行/度数/日期 字段统一变回文本：原文一个字都不动，只是不再参与数值排序。
+            conn.execute(
+                "UPDATE profile_fields SET kind = 'text' WHERE kind NOT IN ('text', 'number')"
+            )
+            conn.execute(
+                "UPDATE profile_values SET num_value = NULL "
+                "WHERE num_value IS NOT NULL AND field_id IN "
+                "(SELECT id FROM profile_fields WHERE kind = 'text')"
+            )
+            columns = {r["name"] for r in conn.execute("PRAGMA table_info(profile_fields)")}
+            if "multiline" in columns:
+                try:
+                    conn.execute("ALTER TABLE profile_fields DROP COLUMN multiline")
+                except sqlite3.OperationalError:
+                    # SQLite 低于 3.35 不支持 DROP COLUMN：留着这一列也无妨
+                    # （它有默认值，新代码从不读写它）。
+                    pass
+
+    def _read_legacy_notes(self):
+        """旧结构（people 表里有 note 列）返回 [(id, note), ...]；否则返回 None。"""
+        with self._read() as conn:
+            columns = [row["name"] for row in conn.execute("PRAGMA table_info(people)")]
+            if "note" not in columns:
+                return None
+            rows = conn.execute("SELECT id, note FROM people").fetchall()
+            return [(int(row["id"]), row["note"]) for row in rows]
+
+    def _backup_before_migration(self, tag):
+        """迁移前把整库另存一份，放在同一个 user_data 目录里。"""
+        backup = self.path.with_name(f"{self.path.name}.{tag}.bak")
+        if backup.exists():
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup = self.path.with_name(f"{self.path.name}.{tag}.{stamp}.bak")
+        source = sqlite3.connect(self.path)
+        target = sqlite3.connect(backup)
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+            source.close()
+
+    # --------------------------------------------------------------- 小工具
 
     @staticmethod
     def _now():
         return datetime.now(timezone.utc).isoformat()
 
     @staticmethod
+    def _int_arg(value, name, default, lo, hi):
+        if value is None or value == "":
+            return default
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} 必须是整数。")
+        return max(lo, min(hi, number))
+
+    @staticmethod
+    def _like(text):
+        """把用户输入变成 LIKE 的“包含”模式，并转义 % _ \\ 这三个特殊字符。"""
+        escaped = (
+            str(text).strip()
+            .replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        return f"%{escaped}%"
+
+    @staticmethod
     def _validate(data):
         display_name = str(data.get("display_name", "")).strip()
-        birth_time = str(data.get("birth_time", "")).strip()
+        birth_time = str(data.get("birth_time", "")).strip().replace("T", " ")
         timezone_offset = str(data.get("timezone_offset", "")).strip()
-        note = str(data.get("note", "") or "")
 
         if not display_name:
             raise ValueError("人物名称不能为空。")
@@ -287,6 +773,10 @@ class ProfileDB:
             raise ValueError("出生时间不能为空。")
         if not timezone_offset:
             raise ValueError("时区不能为空。")
+
+        parsed = parse_birth_time(birth_time)
+        if parsed is None:
+            raise ValueError("出生时间格式无法识别，请使用 YYYY-MM-DD HH:MM[:SS]（不带时区）。")
 
         try:
             latitude = float(data.get("latitude"))
@@ -302,68 +792,650 @@ class ProfileDB:
         return {
             "display_name": display_name,
             "birth_time": birth_time,
+            "birth_ymd": parsed[0],
+            "birth_tod": parsed[1],
             "timezone_offset": timezone_offset,
             "latitude": latitude,
             "longitude": longitude,
-            "note": note,
         }
 
     @staticmethod
-    def _row_to_dict(row):
-        return None if row is None else dict(row)
+    def _clean_label(label):
+        label = " ".join(str(label or "").split())
+        if not label:
+            raise ValueError("字段名不能为空。")
+        if len(label) > MAX_LABEL_LEN:
+            raise ValueError(f"字段名不能超过 {MAX_LABEL_LEN} 个字符。")
+        if label in CORE_FIELD_LABELS:
+            raise ValueError(f"「{label}」是必备字段，不能当作自定义字段名。")
+        return label
 
-    def list_profiles(self):
-        with self._connect() as conn:
+    @staticmethod
+    def _clean_kind(kind):
+        kind = str(kind).strip().lower()
+        if kind not in FIELD_KINDS:
+            raise ValueError(
+                "字段类型只能是：" + "、".join(f"{k}（{v}）" for k, v in FIELD_KINDS.items())
+            )
+        return kind
+
+    @staticmethod
+    def _clean_field_values(conn, raw):
+        """把前端传来的 {字段id: 值} 整理成 {int: (原文, 数值或None)}。
+
+        未知字段 id（例如刚在别处被删）直接忽略；
+        文本字段是单行的：内容里的换行统一换成一个空格；
+        数字字段如果内容无法识别，明确报错，而不是悄悄存成不能排序的文本。
+        """
+        if not raw:
+            return {}
+        defs = {
+            int(r["id"]): (r["label"], r["kind"])
+            for r in conn.execute("SELECT id, label, kind FROM profile_fields")
+        }
+        clean = {}
+        for key, value in dict(raw).items():
+            try:
+                field_id = int(key)
+            except (TypeError, ValueError):
+                continue
+            if field_id not in defs:
+                continue
+            label, kind = defs[field_id]
+            text = "" if value is None else str(value)
+            if len(text) > MAX_VALUE_LEN:
+                raise ValueError(f"单个字段的内容不能超过 {MAX_VALUE_LEN} 个字符。")
+            number = None
+            if kind in NUMERIC_KINDS:
+                text = text.strip()
+                if text:
+                    number = derive_num(kind, text)
+                    if number is None:
+                        raise ValueError(
+                            f"字段「{label}」是「{FIELD_KINDS[kind]}」类型，"
+                            f"无法识别「{text}」（请填数字，例如 12、-3.5、1,024）。"
+                        )
+            else:
+                text = re.sub(r"\s*[\r\n]+\s*", " ", text)
+            clean[field_id] = (text, number)
+        return clean
+
+    @staticmethod
+    def _write_field_values(conn, profile_id, values):
+        for field_id, (text, number) in values.items():
+            if text.strip() == "":
+                conn.execute(
+                    "DELETE FROM profile_values WHERE profile_id = ? AND field_id = ?",
+                    (profile_id, field_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO profile_values (profile_id, field_id, value, num_value)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(profile_id, field_id) DO UPDATE
+                        SET value = excluded.value, num_value = excluded.num_value
+                    """,
+                    (profile_id, field_id, text, number),
+                )
+
+    # ------------------------------------------------------------ 自定义字段
+
+    @staticmethod
+    def _field_dict(row):
+        kind = row["kind"] if row["kind"] in FIELD_KINDS else "text"
+        return {
+            "id": int(row["id"]),
+            "label": row["label"],
+            "kind": kind,
+            "kind_label": FIELD_KINDS[kind],
+            "sortable": kind in NUMERIC_KINDS,
+            "used_count": int(row["used_count"]),
+        }
+
+    _FIELD_SELECT = """
+        SELECT f.id, f.label, f.kind,
+               COUNT(v.profile_id) AS used_count
+        FROM profile_fields AS f
+        LEFT JOIN profile_values AS v ON v.field_id = f.id
+    """
+
+    def list_fields(self):
+        with self._read() as conn:
             rows = conn.execute(
-                """
-                SELECT id, display_name, birth_time, timezone_offset,
-                       latitude, longitude, note, created_at, updated_at
-                FROM people
-                ORDER BY display_name COLLATE NOCASE, id
-                """
+                self._FIELD_SELECT + " GROUP BY f.id ORDER BY f.id"
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._field_dict(r) for r in rows]
+
+    def _get_field(self, field_id):
+        with self._read() as conn:
+            row = conn.execute(
+                self._FIELD_SELECT + " WHERE f.id = ? GROUP BY f.id", (int(field_id),)
+            ).fetchone()
+        return None if row is None else self._field_dict(row)
+
+    def create_field(self, label, kind="text"):
+        label = self._clean_label(label)
+        kind = self._clean_kind(kind or "text")
+        try:
+            with self._tx() as conn:
+                cursor = conn.execute(
+                    "INSERT INTO profile_fields (label, created_at, kind) VALUES (?, ?, ?)",
+                    (label, self._now(), kind),
+                )
+                field_id = int(cursor.lastrowid)
+        except sqlite3.IntegrityError:
+            raise ValueError(f"已经有名为「{label}」的字段了。")
+        return self._get_field(field_id)
+
+    def update_field(self, field_id, data):
+        current = self._get_field(field_id)
+        if current is None:
+            return None
+
+        label = self._clean_label(data["label"]) if "label" in data else current["label"]
+        kind = self._clean_kind(data["kind"]) if data.get("kind") else current["kind"]
+
+        unparsed = 0
+        try:
+            with self._tx() as conn:
+                conn.execute(
+                    "UPDATE profile_fields SET label = ?, kind = ? WHERE id = ?",
+                    (label, kind, int(field_id)),
+                )
+                if kind != current["kind"]:
+                    unparsed = self._rederive_field(conn, int(field_id), kind)
+        except sqlite3.IntegrityError:
+            raise ValueError(f"已经有名为「{label}」的字段了。")
+
+        result = self._get_field(field_id)
+        if unparsed:
+            # 原文都还在，只是这几条没法参与排序；改成数字写法后重新保存即可。
+            result["unparsed_count"] = unparsed
+        return result
+
+    @staticmethod
+    def _rederive_field(conn, field_id, kind):
+        """字段类型变了：按新类型重新解析这个字段下所有人的数值，返回无法识别的条数。"""
+        if kind not in NUMERIC_KINDS:
+            conn.execute(
+                "UPDATE profile_values SET num_value = NULL WHERE field_id = ?",
+                (field_id,),
+            )
+            return 0
+        updates, bad = [], 0
+        for row in conn.execute(
+            "SELECT profile_id, value FROM profile_values WHERE field_id = ?", (field_id,)
+        ):
+            number = derive_num(kind, row["value"])
+            if number is None:
+                bad += 1
+            updates.append((number, int(row["profile_id"]), field_id))
+        conn.executemany(
+            "UPDATE profile_values SET num_value = ? WHERE profile_id = ? AND field_id = ?",
+            updates,
+        )
+        return bad
+
+    def delete_field(self, field_id):
+        """删除字段，并（通过外键级联）删除所有档案里这个字段的数据。"""
+        with self._tx() as conn:
+            cursor = conn.execute(
+                "DELETE FROM profile_fields WHERE id = ?", (int(field_id),)
+            )
+        return cursor.rowcount > 0
+
+    # ------------------------------------------------------------------ 标签
+
+    @staticmethod
+    def _clean_tags(raw):
+        """接受列表或字符串（逗号/顿号/分号/换行分隔）；去空、去重（不分大小写）、限长。"""
+        if raw is None:
+            return []
+        items = [raw] if isinstance(raw, str) else list(raw)
+        result, seen = [], set()
+        for item in items:
+            for piece in re.split(r"[,，、;；\n]+", str(item)):
+                name = " ".join(piece.split())
+                if not name:
+                    continue
+                if len(name) > MAX_TAG_LEN:
+                    raise ValueError(f"单个标签不能超过 {MAX_TAG_LEN} 个字符：{name[:12]}…")
+                key = name.casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                result.append(name)
+        if len(result) > MAX_TAGS_PER_PROFILE:
+            raise ValueError(f"一份档案最多 {MAX_TAGS_PER_PROFILE} 个标签。")
+        return result
+
+    @staticmethod
+    def _prune_tags(conn):
+        """清掉没有任何人使用的标签，标签表不会越积越多。"""
+        conn.execute(
+            "DELETE FROM tags WHERE NOT EXISTS "
+            "(SELECT 1 FROM people_tags pt WHERE pt.tag_id = tags.id)"
+        )
+
+    def _write_tags(self, conn, profile_id, names):
+        """把这个人的标签整体换成 names（增删差集，不重写没变的）。"""
+        wanted = set()
+        for name in names:
+            row = conn.execute(
+                "SELECT id FROM tags WHERE name = ? COLLATE NOCASE", (name,)
+            ).fetchone()
+            if row is None:
+                wanted.add(int(conn.execute("INSERT INTO tags (name) VALUES (?)", (name,)).lastrowid))
+            else:
+                wanted.add(int(row["id"]))
+
+        current = {
+            int(r["tag_id"])
+            for r in conn.execute(
+                "SELECT tag_id FROM people_tags WHERE profile_id = ?", (profile_id,)
+            )
+        }
+        removed = current - wanted
+        for tag_id in removed:
+            conn.execute(
+                "DELETE FROM people_tags WHERE profile_id = ? AND tag_id = ?",
+                (profile_id, tag_id),
+            )
+        for tag_id in wanted - current:
+            conn.execute(
+                "INSERT INTO people_tags (profile_id, tag_id) VALUES (?, ?)",
+                (profile_id, tag_id),
+            )
+        if removed:
+            self._prune_tags(conn)
+
+    def list_tags(self, q=None, limit=200):
+        limit = self._int_arg(limit, "limit", 200, 1, 1000)
+        where, params = "", []
+        if q and str(q).strip():
+            where = "WHERE t.name LIKE ? ESCAPE '\\'"
+            params.append(self._like(q))
+        with self._read() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT t.id, t.name, COUNT(pt.profile_id) AS profile_count
+                FROM tags AS t
+                LEFT JOIN people_tags AS pt ON pt.tag_id = t.id
+                {where}
+                GROUP BY t.id
+                ORDER BY profile_count DESC, t.name COLLATE NOCASE
+                LIMIT ?
+                """,
+                params + [limit],
+            ).fetchall()
+        return [
+            {"id": int(r["id"]), "name": r["name"], "profile_count": int(r["profile_count"])}
+            for r in rows
+        ]
+
+    @staticmethod
+    def _tags_of(conn, profile_ids):
+        """一次查出一批人的标签：{人物id: [标签名, ...]}。"""
+        if not profile_ids:
+            return {}
+        marks = ",".join("?" * len(profile_ids))  # 只拼接占位符，值仍然走参数绑定
+        result = {}
+        for r in conn.execute(
+            f"""
+            SELECT pt.profile_id, t.name
+            FROM people_tags AS pt
+            JOIN tags AS t ON t.id = pt.tag_id
+            WHERE pt.profile_id IN ({marks})
+            ORDER BY t.name COLLATE NOCASE
+            """,
+            list(profile_ids),
+        ):
+            result.setdefault(int(r["profile_id"]), []).append(r["name"])
+        return result
+
+    # ------------------------------------------------------------------ 档案：列表
+
+    # 排序键白名单：用户传来的 sort 只能在这里查表，绝不会被拼进 SQL。
+    _CORE_SORTS = {
+        "name": ("p.display_name COLLATE NOCASE",),
+        "birth": ("p.birth_ymd", "p.birth_tod"),
+        "updated": ("p.updated_at",),
+        "created": ("p.id",),
+        "latitude": ("p.latitude",),
+        "longitude": ("p.longitude",),
+    }
+
+    def _field_kind(self, conn, field_id):
+        row = conn.execute(
+            "SELECT label, kind FROM profile_fields WHERE id = ?", (int(field_id),)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"字段不存在：{field_id}")
+        return row["label"], row["kind"]
+
+    def _tag_condition(self, conn, tags, mode):
+        names = self._clean_tags(tags)
+        if not names:
+            return None, []
+        ids = []
+        for name in names:
+            row = conn.execute(
+                "SELECT id FROM tags WHERE name = ? COLLATE NOCASE", (name,)
+            ).fetchone()
+            if row is not None:
+                ids.append(int(row["id"]))
+            elif mode == "all":
+                return "1 = 0", []        # 要求同时具备某个根本不存在的标签：必然没有结果
+        ids = sorted(set(ids))
+        if not ids:
+            return "1 = 0", []
+        marks = ",".join("?" * len(ids))
+        if mode == "all" and len(ids) > 1:
+            return (
+                "p.id IN (SELECT profile_id FROM people_tags "
+                f"WHERE tag_id IN ({marks}) GROUP BY profile_id HAVING COUNT(*) = ?)",
+                ids + [len(ids)],
+            )
+        return f"p.id IN (SELECT profile_id FROM people_tags WHERE tag_id IN ({marks}))", ids
+
+    def list_profiles(
+        self,
+        *,
+        page=1,
+        page_size=DEFAULT_PAGE_SIZE,
+        q=None,
+        tags=None,
+        tag_mode="all",
+        born_from=None,
+        born_to=None,
+        sort="name",
+        order="asc",
+        num_field=None,
+        num_min=None,
+        num_max=None,
+        with_total=True,
+    ):
+        """分页列表：每页只返回 id、名字、出生时间、修改时间、标签，绝不带自定义字段的内容。
+
+        筛选（可叠加）：
+          q                 名字包含（不分大小写）
+          tags / tag_mode   标签；all＝必须同时具备（默认），any＝具备其一即可
+          born_from/born_to 出生日期范围，写 1980 / 1980-05 / 1980-05-12 均可
+          num_field + num_min/num_max
+                            某个数字类自定义字段的数值范围
+        排序：sort ＝ name | birth | updated | created | latitude | longitude | field:<字段id>
+              order ＝ asc | desc；没有数值的人始终排在最后。
+        """
+        page = self._int_arg(page, "page", 1, 1, 10**9)
+        size = self._int_arg(page_size, "page_size", DEFAULT_PAGE_SIZE, 1, MAX_PAGE_SIZE)
+        offset = (page - 1) * size
+
+        order = str(order or "asc").strip().lower()
+        if order not in ("asc", "desc"):
+            raise ValueError("order 只能是 asc 或 desc。")
+        tag_mode = str(tag_mode or "all").strip().lower()
+        if tag_mode not in ("all", "any"):
+            raise ValueError("tag_mode 只能是 all 或 any。")
+        sort = str(sort or "name").strip()
+
+        with self._read() as conn:
+            where, params = [], []
+
+            if q and str(q).strip():
+                where.append("p.display_name LIKE ? ESCAPE '\\'")
+                params.append(self._like(q))
+
+            if born_from not in (None, ""):
+                where.append("p.birth_ymd >= ?")
+                params.append(period_bound(born_from, end=False))
+            if born_to not in (None, ""):
+                where.append("p.birth_ymd <= ?")
+                params.append(period_bound(born_to, end=True))
+
+            condition, tag_params = self._tag_condition(conn, tags, tag_mode)
+            if condition:
+                where.append(condition)
+                params.extend(tag_params)
+
+            if num_field not in (None, "") and (
+                num_min not in (None, "") or num_max not in (None, "")
+            ):
+                label, kind = self._field_kind(conn, num_field)
+                if kind not in NUMERIC_KINDS:
+                    raise ValueError(f"字段「{label}」不是数字类型，不能按数值筛选。")
+                parts, sub_params = ["field_id = ?"], [int(num_field)]
+                for text, op in ((num_min, ">="), (num_max, "<=")):
+                    if text in (None, ""):
+                        continue
+                    bound = parse_number(text)
+                    if bound is None:
+                        raise ValueError(f"无法识别筛选值：{text!r}，请填数字。")
+                    parts.append(f"num_value {op} ?")
+                    sub_params.append(bound)
+                where.append(
+                    "p.id IN (SELECT profile_id FROM profile_values WHERE "
+                    + " AND ".join(parts) + ")"
+                )
+                params.extend(sub_params)
+
+            # ---- 排序
+            direction = "ASC" if order == "asc" else "DESC"
+            field_sort = None          # 按自定义字段排序时：该字段的 id
+            order_sql = ""
+            if sort.startswith("field:"):
+                try:
+                    field_sort = int(sort.split(":", 1)[1])
+                except ValueError:
+                    raise ValueError("sort 里的字段 id 必须是整数，例如 field:3。")
+                label, kind = self._field_kind(conn, field_sort)
+                if kind not in NUMERIC_KINDS:
+                    raise ValueError(f"字段「{label}」不是数字类型，不能按大小排序。")
+            elif sort in self._CORE_SORTS:
+                columns = list(self._CORE_SORTS[sort])
+                if sort != "created":
+                    columns.append("p.id")   # 并列时按 id 兜底，翻页顺序稳定
+                order_sql = ", ".join(f"{col} {direction}" for col in columns)
+            else:
+                raise ValueError(
+                    "sort 只能是 name / birth / updated / created / latitude / longitude / field:<id>。"
+                )
+
+            where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+            total = None
+            if with_total:
+                total = int(
+                    conn.execute(
+                        f"SELECT COUNT(*) FROM people AS p {where_sql}", params
+                    ).fetchone()[0]
+                )
+
+            if field_sort is None:
+                rows = conn.execute(
+                    f"""
+                    SELECT p.id, p.display_name, p.birth_time, p.updated_at
+                    FROM people AS p
+                    {where_sql}
+                    ORDER BY {order_sql}
+                    LIMIT ? OFFSET ?
+                    """,
+                    params + [size + 1, offset],   # 多取 1 条，用来判断还有没有下一页
+                ).fetchall()
+            else:
+                rows = self._rows_by_field(
+                    conn, field_sort, direction, where, params, size + 1, offset
+                )
+
+            has_more = len(rows) > size
+            rows = rows[:size]
+            tag_map = self._tags_of(conn, [int(r["id"]) for r in rows])
+
+        items = [
+            {
+                "id": int(r["id"]),
+                "display_name": r["display_name"],
+                "birth_time": r["birth_time"],
+                "updated_at": r["updated_at"],
+                "tags": tag_map.get(int(r["id"]), []),
+            }
+            for r in rows
+        ]
+        return {
+            "items": items,
+            "page": page,
+            "page_size": size,
+            "total": total,
+            "total_pages": None if total is None else max(1, math.ceil(total / size)),
+            "has_more": has_more,
+            "sort": sort,
+            "order": order,
+        }
+
+    @staticmethod
+    def _rows_by_field(conn, field_id, direction, where, params, limit, offset):
+        """按某个数字类字段的数值排序的一页（含 limit 条）。
+
+        不用 “people LEFT JOIN 取值 ORDER BY” —— 那样要把全库每个人都查一遍再临时排序。
+        改成两段，各自都能提前收工：
+          ① 有数值的人：直接顺着 (字段, 数值) 索引读，读够一页就停；
+          ② 没有数值的人（没填，或写的内容无法识别）：排在最后，按 id 顺序读。
+        """
+        extra = (" AND " + " AND ".join(where)) if where else ""
+        columns = "p.id, p.display_name, p.birth_time, p.updated_at"
+
+        rows = conn.execute(
+            f"""
+            SELECT {columns}
+            FROM profile_values AS sv
+            JOIN people AS p ON p.id = sv.profile_id
+            WHERE sv.field_id = ? AND sv.num_value IS NOT NULL{extra}
+            ORDER BY sv.num_value {direction}, sv.profile_id {direction}
+            LIMIT ? OFFSET ?
+            """,
+            [field_id] + params + [limit, offset],
+        ).fetchall()
+        if len(rows) >= limit:
+            return rows            # 常规翻页：这一页全是有数值的人，到此为止，不需要任何统计
+
+        # 走到这里说明“有数值的人”在这一页或之前就读完了，需要知道一共有几个，
+        # 才能算出接下来在“没有数值的人”里该从第几个开始读。
+        if rows:
+            with_value_count = offset + len(rows)
+        elif offset == 0:
+            with_value_count = 0
+        else:
+            count_from = (
+                "profile_values AS sv JOIN people AS p ON p.id = sv.profile_id"
+                if where else "profile_values AS sv"
+            )
+            with_value_count = conn.execute(
+                f"SELECT COUNT(*) FROM {count_from} "
+                f"WHERE sv.field_id = ? AND sv.num_value IS NOT NULL{extra}",
+                [field_id] + params,
+            ).fetchone()[0]
+
+        rows += conn.execute(
+            f"""
+            SELECT {columns}
+            FROM people AS p
+            WHERE NOT EXISTS (
+                SELECT 1 FROM profile_values AS sv
+                WHERE sv.profile_id = p.id AND sv.field_id = ?
+                  AND sv.num_value IS NOT NULL
+            ){extra}
+            ORDER BY p.id {direction}
+            LIMIT ? OFFSET ?
+            """,
+            [field_id] + params + [limit - len(rows), max(0, offset - with_value_count)],
+        ).fetchall()
+        return rows
+
+    def count_name(self, name, exclude_id=None):
+        """同名档案有几份（不分大小写）；新建前用来提示“已经有同名档案”。"""
+        sql = "SELECT COUNT(*) FROM people WHERE display_name = ? COLLATE NOCASE"
+        params = [str(name or "").strip()]
+        if exclude_id not in (None, ""):
+            sql += " AND id <> ?"
+            params.append(int(exclude_id))
+        with self._read() as conn:
+            return int(conn.execute(sql, params).fetchone()[0])
+
+    # ------------------------------------------------------------------ 档案：详情 / 写入
 
     def get_profile(self, profile_id):
-        with self._connect() as conn:
+        """点开某个人时才调用：必备字段 + 全部自定义字段（含长文）+ 标签。"""
+        profile_id = int(profile_id)
+        with self._read() as conn:
             row = conn.execute(
-                "SELECT * FROM people WHERE id = ?",
-                (int(profile_id),),
+                """
+                SELECT id, display_name, birth_time, timezone_offset,
+                       latitude, longitude, created_at, updated_at
+                FROM people WHERE id = ?
+                """,
+                (profile_id,),
             ).fetchone()
-        return self._row_to_dict(row)
+            if row is None:
+                return None
+            values = conn.execute(
+                "SELECT field_id, value FROM profile_values WHERE profile_id = ?",
+                (profile_id,),
+            ).fetchall()
+            tags = self._tags_of(conn, [profile_id]).get(profile_id, [])
+        item = dict(row)
+        item["fields"] = {str(int(v["field_id"])): v["value"] for v in values}
+        item["tags"] = tags
+        return item
 
-    def create_profile(self, data):
+    def _insert_profile(self, conn, data):
+        """在已有事务里插入一份档案并返回新 id（以后做批量导入时可以在一个事务里反复调用它）。"""
         clean = self._validate(data)
         now = self._now()
-        with self._connect() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO people (
-                    display_name, birth_time, timezone_offset,
-                    latitude, longitude, note, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    clean["display_name"],
-                    clean["birth_time"],
-                    clean["timezone_offset"],
-                    clean["latitude"],
-                    clean["longitude"],
-                    clean["note"],
-                    now,
-                    now,
-                ),
+        field_values = self._clean_field_values(conn, data.get("fields"))
+        tags = self._clean_tags(data.get("tags"))
+        cursor = conn.execute(
+            """
+            INSERT INTO people (
+                display_name, birth_time, timezone_offset,
+                latitude, longitude, created_at, updated_at,
+                birth_ymd, birth_tod
             )
-            profile_id = int(cursor.lastrowid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                clean["display_name"],
+                clean["birth_time"],
+                clean["timezone_offset"],
+                clean["latitude"],
+                clean["longitude"],
+                now,
+                now,
+                clean["birth_ymd"],
+                clean["birth_tod"],
+            ),
+        )
+        profile_id = int(cursor.lastrowid)
+        self._write_field_values(conn, profile_id, field_values)
+        if tags:
+            self._write_tags(conn, profile_id, tags)
+        return profile_id
+
+    def create_profile(self, data):
+        with self._tx() as conn:
+            profile_id = self._insert_profile(conn, data)
         return self.get_profile(profile_id)
 
     def update_profile(self, profile_id, data):
-        if self.get_profile(profile_id) is None:
-            return None
+        """覆盖保存：必备字段整体覆盖；请求里带了的自定义字段/标签覆盖，没带的保持不变。"""
+        profile_id = int(profile_id)
+        with self._tx() as conn:
+            if conn.execute("SELECT 1 FROM people WHERE id = ?", (profile_id,)).fetchone() is None:
+                return None
 
-        clean = self._validate(data)
-        with self._connect() as conn:
+            clean = self._validate(data)
+            field_values = self._clean_field_values(conn, data.get("fields"))
+            tags = self._clean_tags(data.get("tags")) if "tags" in data else None
+
             conn.execute(
                 """
                 UPDATE people
@@ -372,7 +1444,8 @@ class ProfileDB:
                     timezone_offset = ?,
                     latitude = ?,
                     longitude = ?,
-                    note = ?,
+                    birth_ymd = ?,
+                    birth_tod = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -382,19 +1455,25 @@ class ProfileDB:
                     clean["timezone_offset"],
                     clean["latitude"],
                     clean["longitude"],
-                    clean["note"],
+                    clean["birth_ymd"],
+                    clean["birth_tod"],
                     self._now(),
-                    int(profile_id),
+                    profile_id,
                 ),
             )
+            self._write_field_values(conn, profile_id, field_values)
+            if tags is not None:
+                self._write_tags(conn, profile_id, tags)
         return self.get_profile(profile_id)
 
     def delete_profile(self, profile_id):
-        with self._connect() as conn:
+        with self._tx() as conn:
             cursor = conn.execute(
                 "DELETE FROM people WHERE id = ?",
                 (int(profile_id),),
             )
+            if cursor.rowcount > 0:
+                self._prune_tags(conn)
         return cursor.rowcount > 0
 
 
@@ -589,10 +1668,50 @@ def safe_json(value):
     return str(value)
 
 
+# 主行星在页面上的显示顺序。勾选列表按这个顺序排，而结果表的行顺序就是
+# 「勾选的顺序」，所以改这一处，勾选列表和所有结果表（行星、KP 等）会一起跟着变。
+MAIN_PLANET_ORDER = ("Su", "Mo", "Me", "Ve", "Ma", "Ju", "Sa", "Ra", "Ke", "Ur", "Ne", "Pl")
+
+
+def main_planet_options():
+    available = list(MAIN_PLANETS.keys()) + ["Ra", "Ke"]
+    ordered = [code for code in MAIN_PLANET_ORDER if code in available]
+    # 以后 quant_astro 里新增了主行星、而这里还没排位置时，放到最后，不会丢。
+    return ordered + [code for code in available if code not in ordered]
+
+
+def ayanamsha_options():
+    """直接从当前安装的 pysweph 里枚举全部预定义岁差（SIDM_*），不手写清单。
+
+    这样 pysweph 将来新增岁差时，下拉菜单会自动跟着多出来，不会遗漏。
+    - SIDM_USER 需要额外提供 t0 / ayan_t0 两个参数，不是一个现成的“预设”，所以不放进下拉菜单。
+    - NSIDM_PREDEF 只是“预定义岁差总数”的计数值，不是岁差，同样不列入。
+    """
+    found = []
+    for name in dir(swe):
+        if not name.startswith("SIDM_") or name == "SIDM_USER":
+            continue
+        value = getattr(swe, name)
+        if not isinstance(value, int):
+            continue
+        try:
+            title = str(swe.get_ayanamsa_name(value) or "").strip()
+        except Exception:
+            title = ""
+        found.append((value, name, title))
+
+    found.sort()
+    return [
+        {"value": name, "label": f"{title}（{name}）" if title else name}
+        for _, name, title in found
+    ]
+
+
 def public_options():
     return {
         "house_systems": list(HOUSE_SYSTEMS.keys()),
-        "main_planets": list(MAIN_PLANETS.keys()) + ["Ra", "Ke"],
+        "ayanamsha_modes": ayanamsha_options(),
+        "main_planets": main_planet_options(),
         "minor_planets": list(MINOR_PLANETS.keys()),
         "ecliptic_modes": ["tropical", "sidereal"],
         "node_modes": ["mean", "true"],
@@ -2699,15 +3818,18 @@ const state = {
     settings: null,
     optionsMeta: null,
     results: {},
-    profiles: [],
+    profileFields: [],
+    fieldKinds: [],
+    tagOptions: [],
+    profileList: {items: [], page: 1, pageSize: 50, total: 0, totalPages: 1, hasMore: false},
+    profileQuery: {q: "", bornFrom: "", bornTo: "", tags: [], tagMode: "all", sort: "name", order: "asc", page: 1},
+    listToken: 0,
+    selectToken: 0,
     activeProfileId: null,
     sourceMode: "current",
     initialized: false,
     requestToken: 0,
 };
-
-// 排盘后自动定位并展开 Dasha 到第几层（含第 1 层大运）；改这个数字即可调整深度。
-const AUTO_DASHA_LOCATE_DEPTH = 3;
 
 const $ = (id) => document.getElementById(id);
 
@@ -2726,7 +3848,8 @@ function showError(message) {
     box.classList.remove("hidden");
 }
 
-async function api(url, options = {}) {
+// 返回完整的响应体（除了 data，还有分页列表用的 total / page / has_more 等）。
+async function apiRaw(url, options = {}) {
     const response = await fetch(url, {
         headers: {"Content-Type": "application/json"},
         ...options,
@@ -2735,7 +3858,11 @@ async function api(url, options = {}) {
     if (!response.ok || !payload.ok) {
         throw new Error(payload.error || `请求失败：HTTP ${response.status}`);
     }
-    return payload.data;
+    return payload;
+}
+
+async function api(url, options = {}) {
+    return (await apiRaw(url, options)).data;
 }
 
 function pad2(n) {
@@ -2756,25 +3883,168 @@ function timezoneOffsetString(date = new Date()) {
     return `${sign}${pad2(Math.floor(abs / 60))}:${pad2(abs % 60)}`;
 }
 
-function selectedValues(selectElement) {
-    return Array.from(selectElement.selectedOptions).map((option) => option.value);
+// ---------- 勾选组：主行星 / 小行星 / 恒星 共用同一套交互 ----------
+// 每一项都是独立的复选框：点一下勾上，再点一下取消，互不影响；
+// 每组都有「全选 / 全不选」和「已选 n/m」。恒星组另有「添加」输入框。
+
+const PLANET_NAMES = {
+    Su: "太阳", Mo: "月亮", Me: "水星", Ve: "金星", Ma: "火星", Ju: "木星", Sa: "土星",
+    Ur: "天王星", Ne: "海王星", Pl: "冥王星", Ra: "罗睺", Ke: "计都",
+    Ch: "凯龙", Ph: "福斯", Ce: "谷神", Pa: "智神", Jn: "婚神", Vs: "灶神",
+};
+
+function planetLabel(code) {
+    return PLANET_NAMES[code] ? `${code} ${PLANET_NAMES[code]}` : code;
 }
 
-function setMultiSelect(selectElement, values) {
+function starLabel(value) {
+    const [name, designation] = String(value).split(",").map((s) => s.trim());
+    return designation ? `${name} · ${designation}` : name;
+}
+
+function checkGroupBoxes(rootId) {
+    return Array.from($(rootId).querySelectorAll(".check-grid input[type='checkbox']"));
+}
+
+function updateCheckCount(rootId) {
+    const boxes = checkGroupBoxes(rootId);
+    const checked = boxes.filter((b) => b.checked).length;
+    $(rootId).querySelector(".check-count").textContent = `已选 ${checked}/${boxes.length}`;
+}
+
+function addCheckItem(rootId, value, label, checked, title = "") {
+    const item = document.createElement("label");
+    item.className = "check-item";
+    if (title) item.title = title;
+
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = value;
+    box.checked = checked;
+    box.addEventListener("change", () => updateCheckCount(rootId));
+
+    const text = document.createElement("span");
+    text.textContent = label;
+
+    item.append(box, text);
+    $(rootId).querySelector(".check-grid").appendChild(item);
+}
+
+function getChecked(rootId) {
+    return checkGroupBoxes(rootId).filter((b) => b.checked).map((b) => b.value);
+}
+
+function setChecked(rootId, values) {
     const wanted = new Set(values || []);
-    Array.from(selectElement.options).forEach((option) => {
-        option.selected = wanted.has(option.value);
-    });
+    checkGroupBoxes(rootId).forEach((b) => { b.checked = wanted.has(b.value); });
+    updateCheckCount(rootId);
 }
 
+function mountCheckGroup(rootId, title, items, checkedValues, options = {}) {
+    const root = $(rootId);
+    root.className = "check-group";
+    root.innerHTML = `
+        <div class="check-group-head">
+            <span class="check-group-title">${escapeHtml(title)} <span class="check-count muted"></span></span>
+            <span class="check-group-actions">
+                <button type="button" data-act="all">全选</button>
+                <button type="button" data-act="none">全不选</button>
+            </span>
+        </div>
+        <div class="check-grid"></div>
+        ${options.addable ? `
+        <div class="check-add">
+            <input type="text" placeholder="${escapeHtml(options.addPlaceholder || "")}">
+            <button type="button" data-act="add">添加</button>
+        </div>` : ""}
+    `;
+
+    const wanted = new Set(checkedValues || []);
+    for (const item of items) {
+        addCheckItem(rootId, item.value, item.label, wanted.has(item.value), item.title || "");
+    }
+    updateCheckCount(rootId);
+
+    root.querySelector("[data-act='all']").addEventListener("click", () => {
+        checkGroupBoxes(rootId).forEach((b) => { b.checked = true; });
+        updateCheckCount(rootId);
+    });
+    root.querySelector("[data-act='none']").addEventListener("click", () => {
+        checkGroupBoxes(rootId).forEach((b) => { b.checked = false; });
+        updateCheckCount(rootId);
+    });
+
+    if (options.addable) {
+        const input = root.querySelector(".check-add input");
+        const commit = () => {
+            const value = input.value.split(",").map((s) => s.trim()).filter(Boolean).join(",");
+            if (!value) return;
+            const existing = checkGroupBoxes(rootId).find(
+                (b) => b.value.toLowerCase() === value.toLowerCase()
+            );
+            if (existing) existing.checked = true;
+            else addCheckItem(rootId, value, starLabel(value), true, value);
+            input.value = "";
+            updateCheckCount(rootId);
+        };
+        input.addEventListener("keydown", (event) => {
+            if (event.key === "Enter") {
+                event.preventDefault();
+                commit();
+            }
+        });
+        root.querySelector("[data-act='add']").addEventListener("click", commit);
+    }
+}
+
+function mountSelectionGroups() {
+    const calc = state.settings.calculation_defaults;
+    const meta = state.optionsMeta;
+
+    mountCheckGroup(
+        "selectedPlanets", "主行星",
+        meta.main_planets.map((code) => ({value: code, label: planetLabel(code)})),
+        calc.selected_planets
+    );
+    mountCheckGroup(
+        "selectedMinorPlanets", "小行星",
+        meta.minor_planets.map((code) => ({value: code, label: planetLabel(code)})),
+        calc.selected_minor_planets
+    );
+
+    const stars = Array.from(new Set(calc.selected_stars || []));
+    mountCheckGroup(
+        "selectedStars", "恒星",
+        stars.map((value) => ({value, label: starLabel(value), title: value})),
+        stars,
+        {addable: true, addPlaceholder: "添加恒星，如 Betelgeuse,alOri"}
+    );
+}
+
+// values 里的每一项既可以是字符串，也可以是 {value, label}。
 function fillSelect(selectElement, values) {
     selectElement.innerHTML = "";
-    for (const value of values) {
+    for (const entry of values) {
+        const isObject = entry !== null && typeof entry === "object";
         const option = document.createElement("option");
-        option.value = value;
-        option.textContent = value;
+        option.value = isObject ? entry.value : entry;
+        option.textContent = isObject ? (entry.label ?? entry.value) : entry;
         selectElement.appendChild(option);
     }
+}
+
+// 设置下拉菜单的值；如果 settings.json 里写的值不在选项里（例如手改过），
+// 临时补一个选项，避免下拉菜单悄悄变成空白、又悄悄用另一个值去计算。
+function setSelectValue(selectElement, value) {
+    const text = String(value ?? "");
+    const exists = Array.from(selectElement.options).some((o) => o.value === text);
+    if (!exists && text !== "") {
+        const option = document.createElement("option");
+        option.value = text;
+        option.textContent = `${text}（不在预设列表中）`;
+        selectElement.appendChild(option);
+    }
+    selectElement.value = text;
 }
 
 function setFormFromDefaults() {
@@ -2787,14 +4057,11 @@ function setFormFromDefaults() {
     $("calendar").value = birth.calendar;
 
     $("eclipticMode").value = calc.ecliptic_mode;
-    $("ayanamshaMode").value = calc.ayanamsha_mode;
+    setSelectValue($("ayanamshaMode"), calc.ayanamsha_mode);
     $("nodeMode").value = calc.node_mode;
     $("houseSystem").value = calc.house_system;
     $("heliocentric").checked = Boolean(calc.heliocentric);
     $("strictEphe").checked = Boolean(calc.strict_ephe);
-    setMultiSelect($("selectedPlanets"), calc.selected_planets);
-    setMultiSelect($("selectedMinorPlanets"), calc.selected_minor_planets);
-    $("selectedStars").value = (calc.selected_stars || []).join("\n");
     $("horaryActive").checked = Boolean(calc.KP_HORARY?.is_active);
     $("horaryMode").value = calc.KP_HORARY?.mode || "KS-N";
     $("horaryNumber").value = calc.KP_HORARY?.number ?? 78;
@@ -2837,17 +4104,14 @@ function collectPayload() {
         },
         options: {
             ecliptic_mode: $("eclipticMode").value,
-            ayanamsha_mode: $("ayanamshaMode").value.trim(),
+            ayanamsha_mode: $("ayanamshaMode").value,
             node_mode: $("nodeMode").value,
             house_system: $("houseSystem").value,
             heliocentric: $("heliocentric").checked,
             strict_ephe: $("strictEphe").checked,
-            selected_planets: selectedValues($("selectedPlanets")),
-            selected_minor_planets: selectedValues($("selectedMinorPlanets")),
-            selected_stars: $("selectedStars").value
-                .split(/\r?\n/)
-                .map((x) => x.trim())
-                .filter(Boolean),
+            selected_planets: getChecked("selectedPlanets"),
+            selected_minor_planets: getChecked("selectedMinorPlanets"),
+            selected_stars: getChecked("selectedStars"),
             KP_HORARY: {
                 is_active: $("horaryActive").checked,
                 mode: $("horaryMode").value,
@@ -2870,6 +4134,16 @@ function escapeHtml(value) {
 
 function formatValue(value) {
     if (value === null || value === undefined) return "";
+
+    // 全是简单值的数组（如 KP 的 [1, 5, 9]、["Ju", "Sa"]）显示为「1, 5, 9」，不带方括号；
+    // 空数组显示「—」。数据本身仍是原样的列表，只改显示。
+    if (
+        Array.isArray(value) &&
+        value.every((v) => v === null || ["string", "number", "boolean"].includes(typeof v))
+    ) {
+        return value.length ? escapeHtml(value.join(", ")) : "—";
+    }
+
     if (typeof value === "object") {
         return `<pre>${escapeHtml(JSON.stringify(value, null, 2))}</pre>`;
     }
@@ -2891,6 +4165,17 @@ function renderKeyValue(target, obj) {
     container.innerHTML = html;
 }
 
+// 表格里这几列固定排在最前面、按这个顺序；其余的列（如 KP 的 sign_lord、A/B/C/D）排在后面，彼此保持原有顺序。
+const COLUMN_ORDER = ["dms", "lon", "lat", "ra", "dec", "speed"];
+
+function orderColumns(columns) {
+    const rank = (name) => {
+        const index = COLUMN_ORDER.indexOf(name);
+        return index === -1 ? COLUMN_ORDER.length : index;
+    };
+    return [...columns].sort((a, b) => rank(a) - rank(b));
+}
+
 function renderObjectMap(target, obj) {
     const container = $(target);
     if (!obj || Object.keys(obj).length === 0) {
@@ -2909,7 +4194,7 @@ function renderObjectMap(target, obj) {
         Object.keys(row || {}).forEach((key) => columns.add(key));
     });
 
-    const cols = Array.from(columns);
+    const cols = orderColumns(Array.from(columns));
     let html = "<div class='table-wrap'><table><thead><tr><th>项目</th>";
     html += cols.map((c) => `<th>${escapeHtml(c)}</th>`).join("");
     html += "</tr></thead><tbody>";
@@ -2947,15 +4232,13 @@ function renderAllResults() {
         <h3>KP 宫位星主</h3><div id="kp2"></div>
         <h3>行星象征宫位 ABCD</h3><div id="kp3"></div>
         <h3>宫位象征星 1234</h3><div id="kp4"></div>
-        <h3>真实 Asc KP</h3><div id="kp5"></div>
-        <h3>主宰星</h3><div id="kp6"></div>
+        <h3>主宰星</h3><div id="kp5"></div>
     `;
     renderObjectMap("kp1", state.results.kp_planet_results || {});
     renderObjectMap("kp2", state.results.kp_house_results || {});
     renderObjectMap("kp3", state.results.kp_planet_sigs || {});
     renderObjectMap("kp4", state.results.kp_house_sigs || {});
-    renderKeyValue("kp5", state.results.asc_kp_result || {});
-    renderKeyValue("kp6", state.results.kp_ruling_planets || {});
+    renderKeyValue("kp5", state.results.kp_ruling_planets || {});
 
     $("sunResult").innerHTML = `
         <h3>日出日落</h3><div id="sun1"></div>
@@ -2968,6 +4251,9 @@ function renderAllResults() {
 
     renderDashaRoot();
 }
+
+// 标记「当前所在大运」的符号；想换成别的符号，只改这一处。
+const DASHA_NOW_MARK = "●";
 
 function findNowIndex(items, now) {
     for (let i = 0; i < items.length; i++) {
@@ -2989,7 +4275,9 @@ function fetchDashaChildren(item) {
     });
 }
 
-async function renderDashaRoot() {
+// 排盘后只显示第一层大运（已由后端算好）；当前所在的一支会高亮并加符号标出，但不自动展开。
+// 需要看下一层时，点击某个区间才向后端请求并展开（见 buildDashaLevel），再点一次收起。
+function renderDashaRoot() {
     const root = $("dashaResult");
     root.innerHTML = "";
     const data = state.results.dasha_level1 || [];
@@ -2998,30 +4286,7 @@ async function renderDashaRoot() {
         return;
     }
 
-    const now = new Date();
-    let items = data;
-    let level = 1;
-    let wrapper = buildDashaLevel(items, level, findNowIndex(items, now));
-    root.appendChild(wrapper);
-
-    // 自动定位到包含"今天"的一支，并展开到 AUTO_DASHA_LOCATE_DEPTH 层；
-    // 之后仍然可以在任意层手动点击任意区间继续往下展开/收起（见 buildDashaLevel）。
-    while (level < AUTO_DASHA_LOCATE_DEPTH) {
-        const nowIndex = findNowIndex(items, now);
-        if (nowIndex === -1) break;
-
-        const holder = wrapper.children[nowIndex];
-        try {
-            const children = await fetchDashaChildren(items[nowIndex]);
-            level += 1;
-            wrapper = buildDashaLevel(children, level, findNowIndex(children, now));
-            holder.appendChild(wrapper);
-            items = children;
-        } catch (error) {
-            showError(error.message);
-            break;
-        }
-    }
+    root.appendChild(buildDashaLevel(data, 1, findNowIndex(data, new Date())));
 }
 
 function buildDashaLevel(items, level, nowIndex) {
@@ -3034,8 +4299,9 @@ function buildDashaLevel(items, level, nowIndex) {
         const row = document.createElement("div");
         row.className = "dasha-row" + (index === nowIndex ? " current-dasha" : "");
         row.innerHTML = `
+            <div class="dasha-level-tag">L${level}</div>
             <div class="dasha-planet">${escapeHtml(item.planet)}${
-                index === nowIndex ? '<span class="dasha-now-tag">当前</span>' : ""
+                index === nowIndex ? `<span class="dasha-now-mark">${DASHA_NOW_MARK}</span>` : ""
             }</div>
             <div>${escapeHtml(item.start)}</div>
             <div>${escapeHtml(item.end)}</div>
@@ -3212,46 +4478,400 @@ function switchToManualMode() {
         "手动输入模式：填好时间、时区、经纬度后，点击右上角「排盘」计算。";
 }
 
-function renderProfiles() {
-    const select = $("profileSelect");
-    select.innerHTML = "";
+// ================= 人物档案：分页列表 =================
+// 档案库可能有几万人，所以列表永远只向后端要“一页”（50 人）的基础信息：
+// 名字、出生时间、修改时间、标签。点开某个人时，才去取他的时区、经纬度和全部自定义字段。
 
-    const empty = document.createElement("option");
-    empty.value = "";
-    empty.textContent = "请选择人物档案";
-    select.appendChild(empty);
+const PROFILE_PAGE_SIZE = 50;
 
-    for (const profile of state.profiles) {
-        const option = document.createElement("option");
-        option.value = String(profile.id);
-        option.textContent = profile.display_name;
-        select.appendChild(option);
+const CORE_SORT_OPTIONS = [
+    {value: "name", label: "名字"},
+    {value: "birth", label: "出生时间"},
+    {value: "updated", label: "最近修改"},
+    {value: "created", label: "创建先后"},
+    {value: "latitude", label: "纬度"},
+    {value: "longitude", label: "经度"},
+];
+
+// 出生日期筛选框允许的写法：1980 / 1980-05 / 1980-05-12。
+const BORN_TEXT_RE = /^\d{1,4}(?:[-/.]\d{1,2}){0,2}$/;
+
+function debounce(fn, ms) {
+    let timer = null;
+    return (...args) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn(...args), ms);
+    };
+}
+
+function singleLine(value) {
+    return String(value ?? "").replace(/\s*[\r\n]+\s*/g, " ");
+}
+
+function splitTags(text) {
+    const seen = new Set();
+    const result = [];
+    for (const piece of String(text ?? "").split(/[,，、;；\n]+/)) {
+        const name = piece.trim().replace(/\s+/g, " ");
+        if (!name) continue;
+        const key = name.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.push(name);
     }
+    return result;
+}
 
-    if (state.activeProfileId) {
-        select.value = String(state.activeProfileId);
+function formatBirth(text) {
+    return String(text || "").slice(0, 16);      // 1985-03-04 05:06
+}
+
+function formatDay(isoText) {
+    const date = new Date(isoText);
+    if (Number.isNaN(date.getTime())) return "";
+    return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+}
+
+function hasActiveFilter() {
+    const q = state.profileQuery;
+    return Boolean(q.q.trim() || q.bornFrom.trim() || q.bornTo.trim() || q.tags.length);
+}
+
+function profileListUrl(page) {
+    const q = state.profileQuery;
+    const params = new URLSearchParams();
+    params.set("page", String(page));
+    params.set("page_size", String(PROFILE_PAGE_SIZE));
+    if (q.q.trim()) params.set("q", q.q.trim());
+    if (q.bornFrom.trim()) params.set("born_from", q.bornFrom.trim());
+    if (q.bornTo.trim()) params.set("born_to", q.bornTo.trim());
+    for (const tag of q.tags) params.append("tag", tag);
+    if (q.tags.length > 1) params.set("tag_mode", q.tagMode);
+    params.set("sort", q.sort);
+    params.set("order", q.order);
+    return `/api/profiles?${params.toString()}`;
+}
+
+// payload 的形状和后端 /api/profiles 一致：{data: [...], page, page_size, total, total_pages, has_more}
+function applyProfilePage(payload) {
+    state.profileList = {
+        items: payload.data || [],
+        page: payload.page || 1,
+        pageSize: payload.page_size || PROFILE_PAGE_SIZE,
+        total: payload.total ?? 0,
+        totalPages: payload.total_pages ?? 1,
+        hasMore: Boolean(payload.has_more),
+    };
+    state.profileQuery.page = state.profileList.page;
+    renderProfileList();
+}
+
+async function loadProfileList(page = 1) {
+    const token = ++state.listToken;     // 连续快速操作时，只认最后一次请求的结果
+    $("pagerInfo").textContent = "加载中…";
+    try {
+        const payload = await apiRaw(profileListUrl(page));
+        if (token !== state.listToken) return;
+
+        // 请求的页已经没人了（例如刚删掉这一页的最后一个人）：退回最后一页。
+        if (!payload.data.length && page > 1 && payload.total > 0) {
+            await loadProfileList(payload.total_pages);
+            return;
+        }
+        applyProfilePage(payload);
+    } catch (error) {
+        if (token !== state.listToken) return;
+        showError(error.message);
+        $("pagerInfo").textContent = "加载失败";
     }
 }
 
+// 保存 / 删除之后刷新当前这一页（保持当前的筛选和排序不变）。
 async function refreshProfiles() {
-    state.profiles = await api("/api/profiles");
-    renderProfiles();
+    await loadProfileList(state.profileQuery.page);
+}
+
+function highlightActiveRow() {
+    $("profileList").querySelectorAll(".profile-row").forEach((row) => {
+        row.classList.toggle("active", Number(row.dataset.id) === state.activeProfileId);
+    });
+}
+
+function renderProfileList() {
+    const box = $("profileList");
+    const list = state.profileList;
+    box.innerHTML = "";
+
+    if (!list.items.length) {
+        const empty = document.createElement("p");
+        empty.className = "muted profile-empty";
+        empty.textContent = hasActiveFilter() ? "没有符合条件的档案。" : "还没有档案。";
+        box.appendChild(empty);
+    }
+
+    for (const item of list.items) {
+        const row = document.createElement("div");
+        row.className = "profile-row";
+        row.dataset.id = String(item.id);
+        row.tabIndex = 0;
+        row.setAttribute("role", "option");
+
+        const tags = (item.tags || [])
+            .map((tag) => `<span class="chip small">${escapeHtml(tag)}</span>`)
+            .join("");
+        row.innerHTML = `
+            <div class="profile-row-name">${escapeHtml(item.display_name)}</div>
+            <div class="profile-row-meta">出生 ${escapeHtml(formatBirth(item.birth_time))} · 修改 ${escapeHtml(formatDay(item.updated_at))}</div>
+            ${tags ? `<div class="chips">${tags}</div>` : ""}
+        `;
+
+        const open = async () => {
+            try {
+                await selectProfile(item.id);
+            } catch (error) {
+                showError(error.message);
+            }
+        };
+        row.addEventListener("click", open);
+        row.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                open();
+            }
+        });
+        box.appendChild(row);
+    }
+
+    $("pagerInfo").textContent = `第 ${list.page} / ${list.totalPages} 页 · 共 ${list.total} 人`;
+    $("prevPageBtn").disabled = list.page <= 1;
+    $("nextPageBtn").disabled = !list.hasMore;
+    highlightActiveRow();
+}
+
+// 排序下拉框：固定的几项 + 每个“数字”类型的自定义字段。
+function renderSortOptions() {
+    const options = [...CORE_SORT_OPTIONS];
+    for (const field of state.profileFields) {
+        if (field.kind === "number") {
+            options.push({value: `field:${field.id}`, label: `${field.label}（数字）`});
+        }
+    }
+    // 正在用来排序的字段被删掉了、或不再是数字类型：退回按名字排序。
+    if (!options.some((o) => o.value === state.profileQuery.sort)) {
+        state.profileQuery.sort = "name";
+    }
+    fillSelect($("sortSelect"), options);
+    $("sortSelect").value = state.profileQuery.sort;
+}
+
+// ---------- 标签 ----------
+
+async function refreshTagOptions() {
+    try {
+        state.tagOptions = await api("/api/tags?limit=500");
+    } catch (_) {
+        return;
+    }
+    renderTagDatalist();
+    renderTagSuggest();
+}
+
+function renderTagDatalist() {
+    const list = $("tagDatalist");
+    list.innerHTML = "";
+    for (const tag of state.tagOptions) {
+        const option = document.createElement("option");
+        option.value = tag.name;
+        option.label = `${tag.profile_count} 人`;
+        list.appendChild(option);
+    }
+}
+
+// 编辑区下方的“常用标签”：点一下加上 / 去掉。
+function renderTagSuggest() {
+    const box = $("profileTagSuggest");
+    box.innerHTML = "";
+    const current = new Set(splitTags($("profileTags").value).map((t) => t.toLowerCase()));
+    for (const tag of state.tagOptions.slice(0, 12)) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "chip" + (current.has(tag.name.toLowerCase()) ? " selected" : "");
+        chip.textContent = tag.name;
+        chip.addEventListener("click", () => {
+            const tags = splitTags($("profileTags").value);
+            const index = tags.findIndex((t) => t.toLowerCase() === tag.name.toLowerCase());
+            if (index >= 0) tags.splice(index, 1);
+            else tags.push(tag.name);
+            $("profileTags").value = tags.join(", ");
+            renderTagSuggest();
+        });
+        box.appendChild(chip);
+    }
+}
+
+function renderFilterChips() {
+    const box = $("filterTagChips");
+    box.innerHTML = "";
+    for (const tag of state.profileQuery.tags) {
+        const chip = document.createElement("span");
+        chip.className = "chip selected";
+        chip.append(tag);
+
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "chip-x";
+        remove.textContent = "×";
+        remove.title = "取消这个标签筛选";
+        remove.addEventListener("click", () => {
+            state.profileQuery.tags = state.profileQuery.tags.filter((t) => t !== tag);
+            renderFilterChips();
+            loadProfileList(1);
+        });
+        chip.appendChild(remove);
+        box.appendChild(chip);
+    }
+    $("tagModeSelect").classList.toggle("hidden", state.profileQuery.tags.length < 2);
+}
+
+function resetProfileFilters() {
+    Object.assign(state.profileQuery, {
+        q: "", bornFrom: "", bornTo: "", tags: [], tagMode: "all", sort: "name", order: "asc",
+    });
+    $("profileSearch").value = "";
+    $("bornFrom").value = "";
+    $("bornTo").value = "";
+    $("filterTagInput").value = "";
+    $("tagModeSelect").value = "all";
+    $("orderSelect").value = "asc";
+    $("bornFrom").classList.remove("invalid");
+    $("bornTo").classList.remove("invalid");
+    renderSortOptions();
+    renderFilterChips();
+    loadProfileList(1);
+}
+
+function bindProfileBrowser() {
+    const reload = debounce(() => loadProfileList(1), 300);
+
+    $("profileSearch").addEventListener("input", () => {
+        state.profileQuery.q = $("profileSearch").value;
+        reload();
+    });
+
+    for (const [id, key] of [["bornFrom", "bornFrom"], ["bornTo", "bornTo"]]) {
+        $(id).addEventListener("input", () => {
+            const text = $(id).value.trim();
+            const valid = text === "" || BORN_TEXT_RE.test(text);
+            $(id).classList.toggle("invalid", !valid);
+            if (!valid) return;              // 还没敲完（如 “1980-”）：先不查询，免得弹出报错
+            state.profileQuery[key] = text;
+            reload();
+        });
+    }
+
+    $("filterTagInput").addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        const added = splitTags($("filterTagInput").value);
+        $("filterTagInput").value = "";
+        let changed = false;
+        for (const name of added) {
+            if (!state.profileQuery.tags.some((t) => t.toLowerCase() === name.toLowerCase())) {
+                state.profileQuery.tags.push(name);
+                changed = true;
+            }
+        }
+        if (changed) {
+            renderFilterChips();
+            loadProfileList(1);
+        }
+    });
+
+    $("tagModeSelect").addEventListener("change", () => {
+        state.profileQuery.tagMode = $("tagModeSelect").value;
+        loadProfileList(1);
+    });
+    $("sortSelect").addEventListener("change", () => {
+        state.profileQuery.sort = $("sortSelect").value;
+        loadProfileList(1);
+    });
+    $("orderSelect").addEventListener("change", () => {
+        state.profileQuery.order = $("orderSelect").value;
+        loadProfileList(1);
+    });
+    $("resetFiltersBtn").addEventListener("click", resetProfileFilters);
+
+    $("prevPageBtn").addEventListener("click", () => loadProfileList(state.profileList.page - 1));
+    $("nextPageBtn").addEventListener("click", () => loadProfileList(state.profileList.page + 1));
+    $("pageJump").addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        const wanted = Math.floor(Number($("pageJump").value));
+        if (!wanted) return;
+        const page = Math.max(1, Math.min(wanted, state.profileList.totalPages));
+        $("pageJump").value = "";
+        loadProfileList(page);
+    });
+
+    // 编辑区的标签输入框手动改了，常用标签的高亮要跟着变。
+    $("profileTags").addEventListener("input", renderTagSuggest);
+}
+
+// ---------- 自定义字段：表单里的输入框 ----------
+
+// preserved：{字段id: 值}，用于重画输入框时保留已填内容。
+function renderProfileCustomFields(preserved = null) {
+    const box = $("profileCustomFields");
+    box.innerHTML = "";
+
+    for (const field of state.profileFields) {
+        const isNumber = field.kind === "number";
+
+        const label = document.createElement("label");
+        label.textContent = isNumber ? `${field.label}（数字）` : field.label;
+
+        const input = document.createElement("input");
+        input.type = "text";
+        if (isNumber) {
+            input.inputMode = "decimal";
+            input.placeholder = "数字，如 12、-3.5";
+        }
+        input.dataset.fieldId = String(field.id);
+        input.value = singleLine(preserved?.[field.id]);     // 字段都是单行的，旧数据里的换行显示成空格
+
+        label.appendChild(input);
+        box.appendChild(label);
+    }
+}
+
+function collectProfileFields() {
+    const values = {};
+    $("profileCustomFields").querySelectorAll("[data-field-id]").forEach((el) => {
+        values[el.dataset.fieldId] = el.value;
+    });
+    return values;
 }
 
 function loadProfileIntoForm(profile) {
     $("profileName").value = profile.display_name || "";
-    $("profileNote").value = profile.note || "";
+    $("profileTags").value = (profile.tags || []).join(", ");
+    renderProfileCustomFields(profile.fields || {});
+    renderTagSuggest();
     $("localTime").value = String(profile.birth_time || "").replace(" ", "T");
     $("timezone").value = profile.timezone_offset || "";
     $("latitude").value = profile.latitude ?? "";
     $("longitude").value = profile.longitude ?? "";
 }
 
+// 点开某个人：这时才去取他的完整信息（时区、经纬度、全部自定义字段）。
 async function selectProfile(profileId) {
     if (!profileId) return;
+    const token = ++state.selectToken;
     const profile = await api(`/api/profiles/${profileId}`);
+    if (token !== state.selectToken) return;     // 期间又点了别的人：只认最后一次点击
     state.activeProfileId = profile.id;
     loadProfileIntoForm(profile);
+    highlightActiveRow();
     await calculateFull();
 }
 
@@ -3262,44 +4882,91 @@ function profilePayload() {
         timezone_offset: $("timezone").value.trim(),
         latitude: Number($("latitude").value),
         longitude: Number($("longitude").value),
-        note: $("profileNote").value,
+        tags: splitTags($("profileTags").value),
+        fields: collectProfileFields(),
     };
 }
 
+function clearProfileForm() {
+    state.activeProfileId = null;
+    $("profileName").value = "";
+    $("profileTags").value = "";
+    renderProfileCustomFields(null);
+    renderTagSuggest();
+    highlightActiveRow();
+}
+
+// 保存 / 新建成功后：把服务器整理过的结果（标签去重等）写回表单，并刷新列表和标签。
+async function afterProfileSaved(saved) {
+    state.activeProfileId = saved.id;
+    $("profileTags").value = (saved.tags || []).join(", ");
+    await Promise.all([refreshProfiles(), refreshTagOptions()]);
+    highlightActiveRow();
+}
+
+// 「新建」：把当前表单里的内容存成一份全新的档案，并切换到这份新档案。
+async function createProfileFromForm() {
+    if (!formComplete()) {
+        showError("请先填写完整的本地时间、时区、纬度、经度。");
+        return;
+    }
+    const payload = profilePayload();
+    if (!payload.display_name) {
+        showError("人物名称不能为空。");
+        return;
+    }
+
+    try {
+        showError("");
+        // 列表已经不是全量加载的了，同名检查交给后端。
+        const check = await api(
+            `/api/profiles/check-name?name=${encodeURIComponent(payload.display_name)}`
+        );
+        if (check.count > 0 && !confirm(`已经有 ${check.count} 份叫「${payload.display_name}」的档案了，仍要再新建一份吗？`)) {
+            return;
+        }
+
+        const saved = await api("/api/profiles", {
+            method: "POST",
+            body: JSON.stringify(payload),
+        });
+        await afterProfileSaved(saved);
+        setStatus(`已新建档案「${saved.display_name}」`);
+    } catch (error) {
+        showError(error.message);
+    }
+}
+
+// 「保存」：用当前表单内容直接覆盖当前选中的那份档案。
+async function saveActiveProfile() {
+    if (!state.activeProfileId) {
+        showError("当前没有选中的档案，无法覆盖保存。请先在上方列表里点选一份档案，或点击「新建」把当前内容存成新档案。");
+        return;
+    }
+    if (!formComplete()) {
+        showError("请先填写完整的本地时间、时区、纬度、经度。");
+        return;
+    }
+
+    try {
+        showError("");
+        const saved = await api(`/api/profiles/${state.activeProfileId}`, {
+            method: "PUT",
+            body: JSON.stringify(profilePayload()),
+        });
+        await afterProfileSaved(saved);
+        setStatus(`已覆盖保存「${saved.display_name}」`);
+    } catch (error) {
+        showError(error.message);
+    }
+}
+
 function bindProfileActions() {
-    $("profileSelect").addEventListener("change", async () => {
-        const id = Number($("profileSelect").value);
-        if (!id) return;
-        try {
-            await selectProfile(id);
-        } catch (error) {
-            showError(error.message);
-        }
-    });
+    bindProfileBrowser();
 
-    $("newProfileBtn").addEventListener("click", () => {
-        state.activeProfileId = null;
-        $("profileSelect").value = "";
-        $("profileName").value = "";
-        $("profileNote").value = "";
-    });
-
-    $("saveProfileBtn").addEventListener("click", async () => {
-        // 保存永远新建一条档案（POST），不会覆盖当前选中的这份——
-        // 改了数值但没点保存 = 原档案不受影响；点了保存 = 多出一份新档案。
-        try {
-            const saved = await api("/api/profiles", {
-                method: "POST",
-                body: JSON.stringify(profilePayload()),
-            });
-            state.activeProfileId = saved.id;
-            await refreshProfiles();
-            $("profileSelect").value = String(saved.id);
-            setStatus("已另存为新档案");
-        } catch (error) {
-            showError(error.message);
-        }
-    });
+    $("newProfileBtn").addEventListener("click", createProfileFromForm);
+    $("saveProfileBtn").addEventListener("click", saveActiveProfile);
+    $("clearProfileBtn").addEventListener("click", clearProfileForm);
 
     $("deleteProfileBtn").addEventListener("click", async () => {
         if (!state.activeProfileId) return;
@@ -3309,13 +4976,149 @@ function bindProfileActions() {
             await api(`/api/profiles/${state.activeProfileId}`, {
                 method: "DELETE",
             });
-            state.activeProfileId = null;
-            $("profileName").value = "";
-            $("profileNote").value = "";
-            await refreshProfiles();
+            clearProfileForm();
+            await Promise.all([refreshProfiles(), refreshTagOptions()]);
             setStatus("档案已删除");
         } catch (error) {
             showError(error.message);
+        }
+    });
+
+    bindFieldManager();
+}
+
+// ---------- 自定义字段：管理（增 / 改名 / 改类型 / 删） ----------
+
+async function reloadProfileFields() {
+    const preserved = collectProfileFields();   // 保住已经敲进去、还没保存的内容
+    state.profileFields = await api("/api/profile-fields");
+    renderProfileCustomFields(preserved);
+    renderFieldManager();
+
+    const sortBefore = state.profileQuery.sort;
+    renderSortOptions();
+    if (sortBefore !== state.profileQuery.sort) {
+        await loadProfileList(1);               // 排序用的字段没了，列表已退回按名字排序
+    }
+}
+
+function renderFieldManager() {
+    const box = $("fieldManagerList");
+    box.innerHTML = "";
+
+    if (!state.profileFields.length) {
+        box.innerHTML = "<p class='muted'>还没有自定义字段。</p>";
+        return;
+    }
+
+    for (const field of state.profileFields) {
+        const row = document.createElement("div");
+        row.className = "field-row";
+
+        const name = document.createElement("input");
+        name.type = "text";
+        name.value = field.label;
+        name.maxLength = 40;
+        name.title = "改完按回车，或点一下别处即保存";
+        name.addEventListener("change", async () => {
+            try {
+                showError("");
+                await api(`/api/profile-fields/${field.id}`, {
+                    method: "PUT",
+                    body: JSON.stringify({label: name.value}),
+                });
+                await reloadProfileFields();
+            } catch (error) {
+                showError(error.message);
+                name.value = field.label;
+            }
+        });
+
+        const kind = document.createElement("select");
+        fillSelect(kind, state.fieldKinds);
+        kind.value = field.kind;
+        kind.title = "字段类型";
+        kind.addEventListener("change", async () => {
+            try {
+                showError("");
+                const saved = await api(`/api/profile-fields/${field.id}`, {
+                    method: "PUT",
+                    body: JSON.stringify({kind: kind.value}),
+                });
+                await reloadProfileFields();
+                setStatus(`字段「${saved.label}」已改为${saved.kind_label}类型`);
+                if (saved.unparsed_count) {
+                    showError(
+                        `字段「${saved.label}」已改为数字类型，但有 ${saved.unparsed_count} 份档案里这一项的内容无法识别为数字：` +
+                        `原文都还在，只是不参与排序；之后保存这些档案时，需要先把这一项改成数字或清空。`
+                    );
+                }
+            } catch (error) {
+                showError(error.message);
+                kind.value = field.kind;
+            }
+        });
+
+        const del = document.createElement("button");
+        del.type = "button";
+        del.className = "danger";
+        del.textContent = "删除";
+        del.addEventListener("click", () => deleteField(field));
+
+        row.append(name, kind, del);
+        box.appendChild(row);
+    }
+}
+
+async function addField() {
+    const input = $("newFieldLabel");
+    const label = input.value.trim();
+    if (!label) return;
+
+    try {
+        showError("");
+        await api("/api/profile-fields", {
+            method: "POST",
+            body: JSON.stringify({label, kind: $("newFieldKind").value}),
+        });
+        input.value = "";
+        await reloadProfileFields();
+        setStatus(`已为所有档案添加字段「${label}」`);
+    } catch (error) {
+        showError(error.message);
+    }
+}
+
+async function deleteField(field) {
+    try {
+        showError("");
+        // 先取最新的"有多少份档案填了这一项"，让确认框里的数字是准的。
+        const latest = (await api("/api/profile-fields")).find((f) => f.id === field.id);
+        if (!latest) {
+            await reloadProfileFields();
+            return;
+        }
+
+        const message = latest.used_count > 0
+            ? `确定删除字段「${latest.label}」吗？\n\n所有档案中的这一项都会被一并删除（目前有 ${latest.used_count} 份档案填了内容），且无法恢复。`
+            : `确定删除字段「${latest.label}」吗？`;
+        if (!confirm(message)) return;
+
+        await api(`/api/profile-fields/${field.id}`, {method: "DELETE"});
+        await reloadProfileFields();
+        await refreshProfiles();
+        setStatus(`已从所有档案中删除字段「${latest.label}」`);
+    } catch (error) {
+        showError(error.message);
+    }
+}
+
+function bindFieldManager() {
+    $("addFieldBtn").addEventListener("click", addField);
+    $("newFieldLabel").addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+            event.preventDefault();
+            addField();
         }
     });
 }
@@ -3332,7 +5135,7 @@ function bindModeSwitching() {
                 state.sourceMode = "profile";
                 updateModeUI();
                 $("locationInfo").textContent =
-                    "人物档案模式：选择档案后立即排盘；之后如果修改了数值，需要重新点击「排盘」才会用新数值计算。";
+                    "人物档案模式：在档案列表里点选一个人后立即排盘；之后如果修改了数值，需要重新点击「排盘」才会用新数值计算。";
             }
         });
     });
@@ -3345,16 +5148,26 @@ async function init() {
 
         state.settings = bootstrap.settings;
         state.optionsMeta = bootstrap.options;
-        state.profiles = bootstrap.profiles;
+        state.profileFields = bootstrap.profile_fields || [];
+        state.fieldKinds = bootstrap.field_kinds || [{value: "text", label: "文本"}, {value: "number", label: "数字"}];
+        state.tagOptions = bootstrap.tags || [];
 
         fillSelect($("houseSystem"), state.optionsMeta.house_systems);
-        fillSelect($("selectedPlanets"), state.optionsMeta.main_planets);
-        fillSelect($("selectedMinorPlanets"), state.optionsMeta.minor_planets);
+        fillSelect($("ayanamshaMode"), state.optionsMeta.ayanamsha_modes);
+        mountSelectionGroups();
 
         setFormFromDefaults();
         updateHoraryRange();
         $("horaryMode").addEventListener("change", updateHoraryRange);
-        renderProfiles();
+        fillSelect($("newFieldKind"), state.fieldKinds);
+        renderSortOptions();
+        renderFilterChips();
+        renderTagDatalist();
+        renderTagSuggest();
+        // 启动时后端只给第一页（50 人）的基础信息，不会把整个档案库读进来。
+        applyProfilePage({data: bootstrap.profiles, ...bootstrap.profiles_page});
+        renderProfileCustomFields();
+        renderFieldManager();
 
         bindCalcButton();
         bindModeSwitching();
@@ -3369,6 +5182,8 @@ async function init() {
 }
 
 window.addEventListener("DOMContentLoaded", init);
+
+
 
 
 ########## FILE: static\style.css ##########
@@ -3577,7 +5392,7 @@ pre {
 
 .dasha-row {
     display: grid;
-    grid-template-columns: 60px 1fr 1fr;
+    grid-template-columns: 34px 64px 1fr 1fr;
     gap: 10px;
     align-items: center;
     padding: 7px 8px;
@@ -3593,14 +5408,21 @@ pre {
     border-color: #e8c477;
 }
 
-.dasha-now-tag {
-    margin-left: 8px;
-    padding: 1px 6px;
-    border-radius: 999px;
+.dasha-level-tag {
     font-size: 11px;
     font-weight: 600;
-    color: #8a5a00;
-    background: #ffe4a3;
+    font-variant-numeric: tabular-nums;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-radius: 4px;
+    padding: 1px 0;
+    text-align: center;
+}
+
+.dasha-now-mark {
+    margin-left: 6px;
+    font-size: 12px;
+    color: #c27a00;
 }
 
 fieldset {
@@ -3614,10 +5436,234 @@ legend {
     font-size: 13px;
 }
 
+/* ---------- 勾选组（主行星 / 小行星 / 恒星） ---------- */
+
+.check-group {
+    margin: 14px 0;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.check-group-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+    font-size: 13px;
+    color: var(--muted);
+}
+
+.check-group-actions { display: flex; gap: 6px; }
+
+.check-group-actions button,
+.check-add button {
+    width: auto;
+    margin: 0;
+    padding: 2px 9px;
+    font-size: 12px;
+}
+
+.check-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(135px, 1fr));
+    gap: 2px 8px;
+}
+
+.check-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    padding: 4px 6px;
+    border-radius: 5px;
+    color: var(--text);
+    cursor: pointer;
+    user-select: none;
+}
+
+.check-item:hover { background: var(--accent-soft); }
+.check-item input { width: auto; margin: 0; }
+
+.check-add {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.check-add input { margin-top: 0; }
+.check-add button { padding: 4px 10px; }
+
+/* ---------- 人物档案：自定义字段 ---------- */
+
+.button-row.four { grid-template-columns: repeat(4, 1fr); }
+
+.field-manager {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px dashed var(--border);
+}
+
+.field-manager summary {
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--muted);
+}
+
+.field-row,
+.field-add-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 6px;
+    align-items: center;
+    margin: 6px 0;
+}
+
+.field-row input[type="text"],
+.field-add-row input[type="text"] { margin-top: 0; }
+
+.field-row select,
+.field-add-row select {
+    width: auto;
+    margin: 0;
+    padding: 6px 6px;
+}
+
+.field-row button,
+.field-add-row button {
+    width: auto;
+    margin: 0;
+    padding: 6px 9px;
+}
+
+/* ---------- 人物档案：分页列表 / 筛选 / 标签 ---------- */
+
+.profile-browser { margin-bottom: 4px; }
+
+.profile-filters {
+    display: grid;
+    gap: 6px;
+}
+
+.profile-filters input,
+.profile-filters select,
+.profile-filters button { margin-top: 0; }
+
+.filter-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.filter-row > input { flex: 1 1 0; min-width: 0; }
+.filter-row > select { width: auto; flex: 0 0 auto; }
+.filter-row > select:first-child:not(:only-child) { flex: 1 1 0; min-width: 0; }
+.filter-row > button { width: auto; flex: 0 0 auto; padding: 8px 10px; }
+.filter-sep { color: var(--muted); font-size: 13px; }
+
+input.invalid { border-color: var(--danger); background: var(--error-bg); }
+
+.profile-list {
+    margin-top: 8px;
+    max-height: 340px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+}
+
+.profile-row {
+    padding: 7px 10px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    outline: none;
+}
+
+.profile-row:last-child { border-bottom: 0; }
+.profile-row:hover,
+.profile-row:focus-visible { background: var(--accent-soft); }
+
+.profile-row.active {
+    background: #fff3d6;
+    box-shadow: inset 3px 0 0 #e8c477;
+}
+
+.profile-row-name { font-size: 14px; font-weight: 600; word-break: break-all; }
+.profile-row-meta { margin-top: 1px; font-size: 12px; color: var(--muted); }
+.profile-empty { padding: 14px 10px; margin: 0; text-align: center; }
+
+.pager {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
+    margin-top: 8px;
+}
+
+.pager button { width: auto; margin: 0; padding: 5px 10px; font-size: 13px; }
+.pager button:disabled { opacity: 0.45; cursor: default; background: #fff; }
+.pager span { text-align: center; }
+
+.pager-jump label { margin: 6px 0 0; font-size: 12px; text-align: center; }
+.pager-jump input { width: 70px; margin: 0 2px; padding: 3px 6px; }
+
+.chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.chips:empty { display: none; }
+.profile-row .chips { margin-top: 4px; }
+
+.chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    width: auto;
+    margin: 0;
+    padding: 1px 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: #fff;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+button.chip { cursor: pointer; }
+button.chip:hover { background: var(--accent-soft); }
+.chip.small { padding: 0 7px; background: var(--accent-soft); border-color: transparent; color: var(--accent); }
+.chip.selected { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+
+.chip-x {
+    width: auto;
+    margin: 0;
+    padding: 0 2px;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font-size: 14px;
+    line-height: 1;
+}
+
+.chip-x:hover { background: transparent; color: var(--danger); }
+
+.profile-editor {
+    margin-top: 14px;
+    padding-top: 10px;
+    border-top: 1px dashed var(--border);
+}
+
+.profile-editor h3 { margin: 0 0 4px; font-size: 14px; color: var(--muted); font-weight: 600; }
+
 @media (max-width: 980px) {
     .layout { grid-template-columns: 1fr; }
     .topbar { position: static; }
 }
+
+
 
 
 ########## FILE: templates\index.html ##########
@@ -3655,15 +5701,73 @@ legend {
 
         <section id="profilePanel" class="panel hidden">
             <h2>人物档案</h2>
-            <label>选择档案<select id="profileSelect"></select></label>
-            <label>人物名称<input id="profileName" type="text"></label>
-            <label>备注<textarea id="profileNote" rows="3"></textarea></label>
-            <div class="button-row">
-                <button id="newProfileBtn" type="button">新建</button>
-                <button id="saveProfileBtn" type="button">保存</button>
-                <button id="deleteProfileBtn" type="button" class="danger">删除</button>
+
+            <!-- 档案列表：每页只向后端要 50 人的基础信息（名字、出生时间、修改时间、标签） -->
+            <div class="profile-browser">
+                <div class="profile-filters">
+                    <input id="profileSearch" type="search" placeholder="按名字搜索" autocomplete="off">
+                    <div class="filter-row">
+                        <input id="bornFrom" type="text" inputmode="numeric" placeholder="出生自（如 1980）" autocomplete="off" title="年、年-月、或 年-月-日，均可">
+                        <span class="filter-sep">～</span>
+                        <input id="bornTo" type="text" inputmode="numeric" placeholder="至（如 1989）" autocomplete="off" title="年、年-月、或 年-月-日，均可">
+                    </div>
+                    <div class="filter-row">
+                        <input id="filterTagInput" type="text" list="tagDatalist" placeholder="按标签筛选，回车添加" autocomplete="off">
+                        <select id="tagModeSelect" class="hidden" title="选了多个标签时，它们之间的关系">
+                            <option value="all">全部满足</option>
+                            <option value="any">满足任一</option>
+                        </select>
+                    </div>
+                    <datalist id="tagDatalist"></datalist>
+                    <div id="filterTagChips" class="chips"></div>
+                    <div class="filter-row">
+                        <select id="sortSelect" title="排序依据"></select>
+                        <select id="orderSelect" title="排序方向">
+                            <option value="asc">正序 ↑</option>
+                            <option value="desc">倒序 ↓</option>
+                        </select>
+                        <button id="resetFiltersBtn" type="button" title="清除所有筛选，恢复按名字排序">重置</button>
+                    </div>
+                </div>
+
+                <div id="profileList" class="profile-list" role="listbox" aria-label="人物档案列表"></div>
+
+                <div class="pager">
+                    <button id="prevPageBtn" type="button">‹ 上一页</button>
+                    <span id="pagerInfo" class="muted"></span>
+                    <button id="nextPageBtn" type="button">下一页 ›</button>
+                </div>
+                <div class="pager-jump">
+                    <label>跳到第 <input id="pageJump" type="number" min="1" step="1" placeholder="页码"> 页，回车确定</label>
+                </div>
             </div>
-            <p class="muted">保存永远新建一份档案，不会覆盖当前选中的这份；不点"保存"，原档案不受影响。</p>
+
+            <div class="profile-editor">
+                <h3>档案内容</h3>
+                <label>人物名称<input id="profileName" type="text"></label>
+                <label>分类标签<input id="profileTags" type="text" placeholder="用逗号分隔，如：名人, KP" autocomplete="off"></label>
+                <div id="profileTagSuggest" class="chips" title="点一下就加上 / 去掉这个标签"></div>
+                <div id="profileCustomFields"></div>
+                <p class="muted">出生时间、时区、经纬度在下方「时间与地点」里填写，随档案一起保存。</p>
+                <div class="button-row four">
+                    <button id="newProfileBtn" type="button" title="把当前表单内容存成一份新档案">新建</button>
+                    <button id="saveProfileBtn" type="button" title="用当前表单内容覆盖当前选中的档案">保存</button>
+                    <button id="deleteProfileBtn" type="button" class="danger">删除</button>
+                    <button id="clearProfileBtn" type="button" title="取消选中，并清空人物名称、标签和自定义字段（时间与地点不变）">清空</button>
+                </div>
+                <p class="muted"><b>保存</b>＝覆盖当前选中的档案；<b>新建</b>＝把当前内容另存为一份新档案。</p>
+            </div>
+
+            <details class="field-manager">
+                <summary>管理自定义字段</summary>
+                <p class="muted">增加字段后所有档案都会多出这一项；删除字段会同时删掉所有档案里这一项的内容。类型：<b>文本</b>（单行）；<b>数字</b>（可以在上面的列表里按大小排序）。必备字段（人物名称、出生时间、时区、经纬度）不能删除。</p>
+                <div id="fieldManagerList"></div>
+                <div class="field-add-row">
+                    <input id="newFieldLabel" type="text" placeholder="新字段名称" maxlength="40">
+                    <select id="newFieldKind" title="字段类型"></select>
+                    <button id="addFieldBtn" type="button">添加</button>
+                </div>
+            </details>
         </section>
 
         <section class="panel">
@@ -3691,7 +5795,7 @@ legend {
                     <option value="sidereal">Sidereal</option>
                 </select>
             </label>
-            <label>岁差体系<input id="ayanamshaMode" type="text" value="SIDM_KRISHNAMURTI"></label>
+            <label>岁差体系<select id="ayanamshaMode"></select></label>
             <label>月交点
                 <select id="nodeMode">
                     <option value="mean">Mean Node</option>
@@ -3701,9 +5805,9 @@ legend {
             <label>宫位制<select id="houseSystem"></select></label>
             <label class="checkbox-row"><input id="heliocentric" type="checkbox"> 日心制</label>
             <label class="checkbox-row"><input id="strictEphe" type="checkbox" checked> 严格使用 Swiss Ephemeris 星历文件</label>
-            <label>主行星<select id="selectedPlanets" multiple size="11"></select></label>
-            <label>小行星<select id="selectedMinorPlanets" multiple size="6"></select></label>
-            <label>恒星（每行一个 Swiss Ephemeris 名称）<textarea id="selectedStars" rows="7"></textarea></label>
+            <div id="selectedPlanets"></div>
+            <div id="selectedMinorPlanets"></div>
+            <div id="selectedStars"></div>
 
             <fieldset>
                 <legend>KP 卜卦</legend>
@@ -3735,8 +5839,8 @@ legend {
         <section class="panel result-panel">
             <h2>Vimshottari Dasha</h2>
             <p class="muted">
-                排盘后自动定位并展开到包含"今天"的一支（默认到第 3 层）。
-                点击任意区间可以继续手动展开/收起更深的层级。
+                排盘后只计算并显示第一层大运（L1），● 标出当前所在的一支。
+                点击任意区间才会计算并展开下一层（L2、L3…），再点一次收起，可逐层继续往下展开。
             </p>
             <div id="dashaResult"></div>
         </section>
@@ -3746,6 +5850,8 @@ legend {
 <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>
+
+
 
 
 ########## FILE: user_data\settings.json ##########
